@@ -1,11 +1,11 @@
 # TRAIT — Trajectory Recognition for Automated Insect Tagging
 
-TRAIT is a reproducible pipeline for classifying insect trajectories recorded by optical traps. Given raw (x, y) centroid track CSV files, it applies Savitzky-Golay smoothing, extracts 125 biologically-informed motion features across six domains, and trains and evaluates multiple classifiers.
+TRAIT is a reproducible pipeline for classifying insect trajectories recorded by camera traps. Given raw (x, y) centroid track CSV files, it applies Savitzky-Golay smoothing, extracts 125 biologically-informed motion features across six domains, and trains and evaluates multiple classifiers.
 
 This repository accompanies the paper:
 
-> **[Title]** — *[Authors]*, *[Venue, Year]*
-> DOI: [doi]
+> **Seeing Insects Through Motion: Behaviour-Informed Trajectory Classification for Camera-Trap Pollinator Monitoring** — *[Authors anonymised for double-blind review]*, *WACV 2027*
+> DOI: [to be added upon acceptance]
 
 ---
 
@@ -14,7 +14,7 @@ This repository accompanies the paper:
 ```
 TRAIT/
 ├── run_pipeline.sh              # End-to-end pipeline driver (Phases 1–5)
-├── data/
+├── data/                        # Dataset included in this bundle (see "Dataset")
 │   ├── tracks/                  # 28,295 raw track CSVs (Farm A + Farm B)
 │   └── track_classification.csv # filepath, label (insect / not_insect)
 └── src/
@@ -49,15 +49,21 @@ The dataset consists of 28,295 manually annotated 2D centroid trajectory recordi
 | Farm B | 36       | 9,474  |
 | **Total** | **153** | **28,295** |
 
-Insect prevalence is 12.9% across the full dataset. Each track is a short CSV of `(nframe, x, y)` pixel detections produced by an optical trapping system.
+Insect prevalence is 12.9% across the full dataset. Each track is a short CSV of `(nframe, x, y)` pixel detections produced by a camera-trap system.
 
-**Directory layout (included in this repo):**
+### Availability
+
+The full dataset is **included in this bundle** under `data/`, so the pipeline runs without any additional download:
 
 ```
 data/
 ├── tracks/                  # One CSV per track (nframe, x, y)
 └── track_classification.csv # filepath, label  (insect / not_insect)
 ```
+
+It is also archived (CC BY 4.0) at the anonymised link below for public reference:
+
+> https://figshare.com/s/03bd981a356bfc62584d
 
 Track filenames follow the canonical format:
 
