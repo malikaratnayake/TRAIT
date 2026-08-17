@@ -82,3 +82,7 @@ M*_R*/
 Thumbs.db
 .vscode/
 .idea/
+
+
+#Deployment files
+deployment/
