@@ -28,6 +28,17 @@ Run from the TRAIT project root (needs PyTorch in $PYTHON):
 The four input channels (x_norm, y_norm, speed_norm, dheading) match
 train_rocket.py exactly, so the FCN and miniROCKET consume an identical
 trajectory representation without exposing absolute image-frame position.
+
+Preprocessing parity (2026-08 fix): gap-filling now reuses the exact
+linear-interpolation-then-SG-smoothing logic used by src/generate_features.py
+to build the engineered-feature set (via src/utils/smoothing.smooth_coords),
+instead of dropping missing-detection frames before smoothing. Previously
+this script discarded NaN rows prior to smoothing, which compressed the
+effective time base at every gap and fed the derived speed/heading channels
+spurious jumps at gap boundaries. Both baselines and the engineered features
+now consume an identical gap-filled trajectory; the only remaining difference
+is whether behaviour-informed features are computed from it or raw channels
+are fed directly to the model.
 """
 
 import argparse
@@ -39,7 +50,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.signal import savgol_filter
 from sklearn.metrics import (
     average_precision_score,
     f1_score,
@@ -48,6 +58,9 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.utils.smoothing import smooth_coords  # same fn used by generate_features.py
 
 warnings.filterwarnings("ignore")
 
@@ -132,11 +145,25 @@ def resolve_device(torch, requested: str):
 
 # ─── Helpers (identical representation to train_rocket.py) ─────────────────────
 
-def smooth(arr: np.ndarray) -> np.ndarray:
-    """Apply SG filter; fall back to raw if track is too short."""
-    if len(arr) >= SG_WINDOW:
-        return savgol_filter(arr, window_length=SG_WINDOW, polyorder=SG_POLY)
-    return arr.copy()
+def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
+    """Gap-fill via linear interpolation, then SG-smooth.
+
+    Reuses smooth_coords (src/utils/smoothing.py) with the exact same
+    interpolation step used by src/generate_features.py's on-the-fly
+    smoothing path (main(), ~line 2213): NaN gaps are linearly interpolated
+    over row index before the SG filter is applied, so the sequence baselines
+    consume the identical gap-filled trajectory as the engineered features,
+    rather than a version with missing-detection frames dropped.
+    """
+    x = x_raw.astype(float).copy()
+    y = y_raw.astype(float).copy()
+    idx = np.arange(len(x))
+    for arr in (x, y):
+        nans = np.isnan(arr)
+        if nans.any() and (~nans).any():
+            arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
+    sx, sy = smooth_coords(x, y, method="savgol", window_length=SG_WINDOW, polyorder=SG_POLY)
+    return sx.astype(np.float32), sy.astype(np.float32)
 
 
 def normalise_track_frame(sx: np.ndarray, sy: np.ndarray, speed: np.ndarray):
@@ -157,22 +184,25 @@ def load_track(csv_path: Path, max_len: int):
     array padded / truncated to max_len and ``real_len`` is the number of
     genuine (non-padded) frames it contains (= min(T, max_len)).
 
-    Returns None if the file is missing or has fewer than 3 valid frames.
+    Returns None if the file is missing or has fewer than 3 valid (non-NaN)
+    detections. Gaps between valid detections are linearly interpolated
+    (matching the engineered-feature pipeline) rather than dropped, so the
+    row count / effective time base is preserved across the track's full
+    recorded span.
     """
     try:
         df = pd.read_csv(csv_path)
     except Exception:
         return None
 
-    df = df.dropna(subset=["x", "y"]).reset_index(drop=True)
-    if len(df) < 3:
+    n_valid = df[["x", "y"]].dropna().shape[0]
+    if n_valid < 3:
         return None
 
-    x_raw = df["x"].to_numpy(dtype=np.float32)
-    y_raw = df["y"].to_numpy(dtype=np.float32)
+    x_raw = df["x"].to_numpy(dtype=np.float64)
+    y_raw = df["y"].to_numpy(dtype=np.float64)
 
-    sx = smooth(x_raw)
-    sy = smooth(y_raw)
+    sx, sy = interpolate_and_smooth(x_raw, y_raw)
 
     dx = np.diff(sx, prepend=sx[0])
     dy = np.diff(sy, prepend=sy[0])

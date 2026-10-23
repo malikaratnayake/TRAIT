@@ -22,6 +22,11 @@ If a `.venv-rocket` virtual environment exists at the project root, this script
 relaunches itself inside it automatically — a fallback for anyone who prefers
 to keep miniROCKET's older pinned dependencies isolated from the rest of the
 stack instead of installing them into trait-env.
+
+Preprocessing parity (2026-08 fix): gap-filling now reuses the exact
+linear-interpolation-then-SG-smoothing logic used by src/generate_features.py
+(via src/utils/smoothing.smooth_coords) instead of dropping missing-detection
+frames before smoothing. See train_fcn.py for the same fix and rationale.
 """
 
 import argparse
@@ -58,7 +63,6 @@ _bootstrap_isolated_environment()
 
 import numpy as np
 import pandas as pd
-from scipy.signal import savgol_filter
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 from sklearn.metrics import (
     average_precision_score,
@@ -69,6 +73,9 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.utils.smoothing import smooth_coords  # same fn used by generate_features.py
 
 warnings.filterwarnings("ignore")
 
@@ -93,11 +100,25 @@ _DEFAULT_RESULTS_DIR = RESULTS_DIR
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def smooth(arr: np.ndarray) -> np.ndarray:
-    """Apply SG filter; fall back to raw if track is too short."""
-    if len(arr) >= SG_WINDOW:
-        return savgol_filter(arr, window_length=SG_WINDOW, polyorder=SG_POLY)
-    return arr.copy()
+def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
+    """Gap-fill via linear interpolation, then SG-smooth.
+
+    Reuses smooth_coords (src/utils/smoothing.py) with the exact same
+    interpolation step used by src/generate_features.py's on-the-fly
+    smoothing path (main(), ~line 2213): NaN gaps are linearly interpolated
+    over row index before the SG filter is applied, so this baseline
+    consumes the identical gap-filled trajectory as the engineered features,
+    rather than a version with missing-detection frames dropped.
+    """
+    x = x_raw.astype(float).copy()
+    y = y_raw.astype(float).copy()
+    idx = np.arange(len(x))
+    for arr in (x, y):
+        nans = np.isnan(arr)
+        if nans.any() and (~nans).any():
+            arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
+    sx, sy = smooth_coords(x, y, method="savgol", window_length=SG_WINDOW, polyorder=SG_POLY)
+    return sx.astype(np.float32), sy.astype(np.float32)
 
 
 def normalise_track_frame(sx: np.ndarray, sy: np.ndarray, speed: np.ndarray):
@@ -116,23 +137,23 @@ def load_track(csv_path: Path, max_len: int):   # -> np.ndarray | None  (Python 
     Load a track CSV, apply SG smoothing, compute derived channels, and
     return a (C, T) array padded / truncated to max_len.
 
-    Returns None if the file is missing or has fewer than 3 valid frames.
+    Returns None if the file is missing or has fewer than 3 valid (non-NaN)
+    detections. Gaps between valid detections are linearly interpolated
+    (matching the engineered-feature pipeline) rather than dropped.
     """
     try:
         df = pd.read_csv(csv_path)
     except Exception:
         return None
 
-    # Drop gap-filled frames (NaN in raw coords)
-    df = df.dropna(subset=["x", "y"]).reset_index(drop=True)
-    if len(df) < 3:
+    n_valid = df[["x", "y"]].dropna().shape[0]
+    if n_valid < 3:
         return None
 
-    x_raw = df["x"].to_numpy(dtype=np.float32)
-    y_raw = df["y"].to_numpy(dtype=np.float32)
+    x_raw = df["x"].to_numpy(dtype=np.float64)
+    y_raw = df["y"].to_numpy(dtype=np.float64)
 
-    sx = smooth(x_raw)
-    sy = smooth(y_raw)
+    sx, sy = interpolate_and_smooth(x_raw, y_raw)
 
     # Speed (pixels/frame)
     dx = np.diff(sx, prepend=sx[0])
@@ -278,7 +299,8 @@ def check_dependencies(use_multi: bool = False):
 
 
 def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = DEFAULT_N_JOBS,
-        selection_metric: str = "internal_cv", model_name: str | None = None):
+        selection_metric: str = "internal_cv", model_name: str | None = None,
+        limit: int | None = None):
     if selection_metric not in {"internal_cv", "pr_auc"}:
         raise ValueError("selection_metric must be either 'internal_cv' or 'pr_auc'")
 
@@ -329,9 +351,12 @@ def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = D
 
     # ── 3. Load and featurise tracks ────────────────────────────────────────
     def build_array(file_set: set, desc: str):
+        files_sorted = sorted(file_set)
+        if limit is not None:
+            files_sorted = files_sorted[:limit]
         X, y, fnames = [], [], []
         missing = 0
-        for fn in sorted(file_set):
+        for fn in files_sorted:
             path = TRACKS_DIR / fn
             arr = load_track(path, max_len)
             if arr is None:
@@ -534,6 +559,8 @@ if __name__ == "__main__":
                         help="Ridge alpha selection metric (default: internal_cv)")
     parser.add_argument("--model-name", default=None,
                         help="Model label written to result files")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Cap tracks per split (smoke-testing only)")
     args = parser.parse_args()
 
     if args.output_dir is not None:
@@ -546,4 +573,5 @@ if __name__ == "__main__":
         sweep_max_len()
     else:
         run(max_len=args.max_len, use_multi=args.multi, n_jobs=args.n_jobs,
-            selection_metric=args.selection_metric, model_name=args.model_name)
+            selection_metric=args.selection_metric, model_name=args.model_name,
+            limit=args.limit)

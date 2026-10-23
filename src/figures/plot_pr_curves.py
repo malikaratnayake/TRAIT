@@ -5,6 +5,8 @@ Inputs are the per-model `*_pr_curve.csv` files written by:
   - src/models/majority_baseline.py
   - src/train_rocket.py
   - src/train_fcn.py
+  - src/train_transformer.py
+  - src/train_convtran.py
 
 Outputs:
   - phase3_precision_recall_curves.csv
@@ -35,6 +37,9 @@ TICK_LABEL_SIZE = 12
 LEGEND_SIZE = 11
 
 
+# PLOT_ORDER is the actual filter: any model whose name is not listed there
+# is silently dropped from both the figure and the combined CSV, regardless
+# of whether it has a DISPLAY_NAMES entry. Keep the two in sync.
 DISPLAY_NAMES = {
     "majority": "Majority baseline",
     "logistic_regression_prauc": "Logistic Regression",
@@ -42,11 +47,23 @@ DISPLAY_NAMES = {
     "xgboost_prauc": "XGBoost",
     "FCN_PR_AUC": "1D-CNN",
     "MiniROCKET_PR_AUC": "MiniROCKET",
+    # "Transformer_PR_AUC" is what `python src/train_transformer.py` produces
+    # when run manually without --model-name; the pipeline itself always
+    # passes --model-name Transformer_Warmup_PR_AUC. Both map to the same
+    # label because they are the same architecture and training recipe.
+    "Transformer_PR_AUC": "Transformer",
+    "Transformer_Warmup_PR_AUC": "Transformer",
+    "ConvTran_PR_AUC": "ConvTran",
 }
 
+# Deliberately excludes "Transformer_NoWarmup_PR_AUC": the no-warmup run was
+# a development-time ablation (see run_pipeline_review.sh header) and is not
+# a reported baseline, so results directories that still contain it from an
+# earlier run will not have it plotted.
 PLOT_ORDER = [
     "majority", "logistic_regression_prauc", "random_forest_prauc",
     "xgboost_prauc", "FCN_PR_AUC", "MiniROCKET_PR_AUC",
+    "Transformer_PR_AUC", "Transformer_Warmup_PR_AUC", "ConvTran_PR_AUC",
 ]
 
 
