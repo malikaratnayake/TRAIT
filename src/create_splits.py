@@ -330,49 +330,40 @@ def _validate_no_leakage(df: pd.DataFrame, n_folds: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _build_stats(splits_df: pd.DataFrame, n_folds: int) -> pd.DataFrame:
-    rows = []
+    """Summarise tracks, class balance, locations and stations per partition.
+
+    Stations are counted by group_key (farm + location + station), the unit
+    the folds are grouped on, so the counts match Table 1 of the paper.
+    """
     binary = pd.Series(_binary_labels(splits_df["label"]), index=splits_df.index)
 
+    def _stats(m: pd.Series, fold: int, label: str) -> dict:
+        n = int(m.sum())
+        n_ins = int(binary[m].sum())
+        return {
+            "fold": fold,
+            "partition": label,
+            "n_tracks": n,
+            "n_insect": n_ins,
+            "n_not_insect": n - n_ins,
+            "pct_insect": round(100 * n_ins / n if n else 0, 1),
+            "n_locations": splits_df.loc[m, "farm_id"].nunique(),
+            "n_stations": splits_df.loc[m, "group_key"].nunique(),
+        }
+
+    rows = []
     for fold in range(n_folds):
         mask = splits_df["fold"] == fold
         role = "test" if fold == (n_folds - 1) else "val"
         train_mask = (~mask) & (splits_df["split_role"] == "trainval")
+        rows.append(_stats(train_mask, fold, f"fold{fold}_train"))
+        rows.append(_stats(mask, fold, f"fold{fold}_{role}"))
 
-        def _stats(m: pd.Series, label: str) -> dict:
-            n = m.sum()
-            n_ins = binary[m].sum()
-            pct = 100 * n_ins / n if n else 0
-            farms = splits_df.loc[m, "farm_id"].nunique()
-            stations = splits_df.loc[m, "station_id"].nunique()
-            return {
-                "fold": fold,
-                "partition": label,
-                "n_tracks": n,
-                "n_insect": int(n_ins),
-                "n_not_insect": int(n - n_ins),
-                "pct_insect": round(pct, 1),
-                "n_farms": farms,
-                "n_stations": stations,
-            }
-
-        rows.append(_stats(train_mask, f"fold{fold}_train"))
-        rows.append(_stats(mask, f"fold{fold}_{role}"))
-
-    # Cross-farm rows
+    # Per-farm and whole-dataset rows
     for role_label in ["Farm_A", "Farm_B"]:
-        m = splits_df["cross_farm_role"] == role_label
-        n = m.sum()
-        n_ins = binary[m].sum()
-        rows.append({
-            "fold": -1,
-            "partition": f"cross_farm_{role_label}",
-            "n_tracks": n,
-            "n_insect": int(n_ins),
-            "n_not_insect": int(n - n_ins),
-            "pct_insect": round(100 * n_ins / n if n else 0, 1),
-            "n_farms": splits_df.loc[m, "farm_id"].nunique(),
-            "n_stations": splits_df.loc[m, "station_id"].nunique(),
-        })
+        rows.append(_stats(splits_df["cross_farm_role"] == role_label, -1,
+                           f"cross_farm_{role_label}"))
+    rows.append(_stats(pd.Series(True, index=splits_df.index), -1, "full_dataset"))
 
     return pd.DataFrame(rows)
 
@@ -382,12 +373,12 @@ def _print_summary(splits_df: pd.DataFrame, stats_df: pd.DataFrame, n_folds: int
     print("=" * 65)
     print("SPLIT SUMMARY")
     print("=" * 65)
-    print(f"{'Partition':<28} {'Tracks':>7} {'Insect':>7} {'%Ins':>6} {'Farms':>6} {'Stations':>9}")
+    print(f"{'Partition':<28} {'Tracks':>7} {'Insect':>7} {'%Ins':>6} {'Locs':>6} {'Stations':>9}")
     print("-" * 65)
     for _, row in stats_df.iterrows():
         print(
             f"  {row['partition']:<26} {row['n_tracks']:>7,} {row['n_insect']:>7,} "
-            f"{row['pct_insect']:>5.1f}% {row['n_farms']:>6} {row['n_stations']:>9}"
+            f"{row['pct_insect']:>5.1f}% {row['n_locations']:>6} {row['n_stations']:>9}"
         )
     print("=" * 65)
 
