@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software or the TRAIT dataset, please cite the paper below."
+title: "TRAIT: Trajectory Recognition for Automated Insect Tagging"
+type: software
+authors:
+  - family-names: Ratnayake
+    given-names: Malika Nisal
+    affiliation: Monash University
+  - family-names: Dorin
+    given-names: Alan
+    affiliation: Monash University
+repository-code: "https://github.com/malikaratnayake/TRAIT"
+keywords:
+  - insect detection
+  - trajectory classification
+  - pollinator monitoring
+  - camera traps
+preferred-citation:
+  type: conference-paper
+  title: "Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps"
+  authors:
+    - family-names: Ratnayake
+      given-names: Malika Nisal
+    - family-names: Dorin
+      given-names: Alan
+  collection-title: "Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)"
+  conference:
+    name: "IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)"
+  year: 2027

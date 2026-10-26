@@ -23,6 +23,7 @@ On a held-out, station-disjoint test set, XGBoost on the 125 features reaches
 - [Method overview](#method-overview)
 - [Installation](#installation)
 - [Reproducing the paper](#reproducing-the-paper)
+- [Comparing with the published results](#comparing-with-the-published-results)
 - [Where each result comes from](#where-each-result-comes-from)
 - [Supplementary studies](#supplementary-studies)
 - [Repository structure](#repository-structure)
@@ -56,14 +57,18 @@ of the source present for more than 50% of its duration.
 
 ### Download
 
-The dataset is released under CC BY 4.0 at **[dataset DOI — to be added]**. Download it
-and extract it into `data/` so the layout is:
+The dataset is published on Figshare under CC BY 4.0: **[Figshare DOI — to be added]**.
+Download `TRAIT_dataset.zip` and extract it into `data/` so the layout is:
 
 ```
 data/
 ├── tracks/                    # 28,295 CSV files, columns: nframe, x, y (pixels)
-└── track_classification.csv   # columns: filepath, label (insect | not_insect)
+├── track_classification.csv   # columns: filepath, label (insect | not_insect)
+└── splits_folds.csv           # the five-fold assignment used in the paper
 ```
+
+The archive also contains a README describing the data and a SHA-256 checksum for every
+file.
 
 ### File naming
 
@@ -85,8 +90,8 @@ They are used to build station-disjoint splits but are never used as model input
 ## Method overview
 
 1. **Gap filling and smoothing.** Missed detections are filled by linear interpolation
-   over the frame index. Tracks shorter than five frames are discarded. Coordinates are
-   then smoothed with a Savitzky–Golay filter (11-frame window, polynomial order 2). For
+   over the frame index. Tracks shorter than five frames were excluded when the dataset
+   was built (the shortest released track has 10 points). Coordinates are then smoothed with a Savitzky–Golay filter (11-frame window, polynomial order 2). For
    shorter tracks the largest valid odd window is used.
 2. **Feature extraction.** 125 features in six domains and 32 subgroups are computed from
    the smoothed track. The wingbeat-residual features also use the raw coordinates.
@@ -150,10 +155,18 @@ bash run_pipeline.sh --fps 30 --test-run --run-name paper
 
 Outputs are written to `data/results/paper/`. `--test-run` runs every model on one CPU
 thread, uses deterministic PyTorch with seed 42, and keeps the 1D-CNN and ConvTran on the
-CPU. This is the configuration behind the reported results and latencies (Linux, 16 GB
-RAM, CPU only). It is slow, so plan for a long run. Without `--test-run`, model fitting
-uses all available cores and is faster, but the last decimal places of some results may
-differ.
+CPU. This is the configuration behind the reported results and latencies. It is slow, so
+plan for a long run. Without `--test-run`, model fitting uses all available cores and is
+faster, but the last decimal places of some results may differ.
+
+The published results were produced on Linux x86-64 (CPU only, 16 GB RAM) with the
+package versions in `requirements.txt`, and a `--test-run` on that platform reproduces
+them exactly. On other platforms, for example macOS on Apple silicon, floating-point
+differences can change some values in the third or fourth decimal place (cross-farm
+PR-AUC by up to 0.004 in our tests).
+
+Phase 2 regenerates `data/splits_folds.csv` and `data/split_statistics.csv`; the regenerated
+fold assignment is identical to the one in the dataset download.
 
 Each step writes a checkpoint when it finishes. Re-running the same command skips
 completed steps, so an interrupted run can simply be restarted.
@@ -191,6 +204,32 @@ Held-out test set (fold 4, 5,456 tracks, 14.6% insect). Latencies depend on the 
 | 1D-CNN (FCN) | 0.848 (0.824–0.871) | 0.86 | 0.776 | 0.721 | 0.839 | 5.35 |
 | miniROCKET | 0.817 (0.794–0.841) | 0.30 | 0.738 | 0.772 | 0.707 | 6.07 |
 | ConvTran | 0.847 (0.823–0.872) | 0.88 | 0.781 | 0.724 | 0.848 | 19.66 |
+
+---
+
+## Comparing with the published results
+
+The outputs of the run reported in the paper are attached to the
+[`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027) as
+`TRAIT_paper_results.zip`. They include every table, the per-track test predictions of
+each model, the feature table, the fitted LR, Random Forest and XGBoost models, and the
+outputs of the two supplementary studies, in the same layout as a run folder.
+
+To check your own run against them, unzip the archive and run:
+
+```bash
+python src/compare_results.py \
+    --run       data/results/paper \
+    --reference TRAIT_paper_results \
+    --features \
+    --splits-run data/splits_folds.csv --splits-reference TRAIT_paper_results/splits_folds.csv
+```
+
+It compares every value behind the paper's tables, each model's per-track test scores, the
+feature table and the fold assignment. Each value is reported as identical, within the
+tolerance (`--tol`, default 0.0005) or different; latency is listed but not compared,
+because it depends on the hardware. The exit status is 0 when everything is within the
+tolerance. Use `--details-csv FILE` to save every comparison.
 
 ---
 
@@ -256,6 +295,7 @@ TRAIT/
 ├── run_pipeline.sh                     # Runs the full pipeline (Phases 1–5)
 ├── clean.sh                            # Deletes one run folder (dry run unless --confirm)
 ├── requirements.txt                    # Pinned dependencies used for the paper
+├── CITATION.cff                        # How to cite this software and the paper
 ├── data/                               # Put the downloaded dataset here
 └── src/
     ├── generate_features.py            # Phase 1: gap filling, smoothing, 125 features
@@ -273,6 +313,7 @@ TRAIT/
     ├── operating_points.py             # XGBoost operating points (Supp. Table 10)
     ├── cross_farm_threshold_study.py   # Threshold robustness (Supp. Table 9)
     ├── convtran_batch_size_study.py    # ConvTran batch-size sweep (Supp. Table 11)
+    ├── compare_results.py              # Compares a run with the published results
     ├── figures/
     │   ├── plot_session_trajectories.py        # Figure 2
     │   ├── plot_class_trajectory_overlays.py   # Figure 3
@@ -291,7 +332,8 @@ split files or run folders that contain read-only files.
 
 ## Citation
 
-If you use the code or dataset, please cite:
+If you use the code or dataset, please cite the paper (GitHub's "Cite this repository"
+button uses `CITATION.cff`):
 
 ```bibtex
 @inproceedings{ratnayake2027trait,
