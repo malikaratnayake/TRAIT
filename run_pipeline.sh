@@ -56,6 +56,10 @@
 #   --test-run           Deterministic mode used for the paper: single-threaded
 #                        model fitting, deterministic PyTorch, CPU-only 1D-CNN and
 #                        ConvTran.
+#   --allow-missing-deps Continue if torch, aeon or xgboost is missing, skipping
+#                        the steps that need them (by default the pipeline
+#                        stops). Skipped steps are not checkpointed, so they
+#                        run on a later invocation once the package is installed.
 #   --dry-run            Print commands without executing
 #   -h, --help           Show this help and exit
 #
@@ -92,6 +96,7 @@ FORCE=0
 OVERWRITE_RESULTS=0
 RUN_NAME=""
 DRY_RUN=0
+ALLOW_MISSING_DEPS=0
 FOLD_STRATEGY="stratified_group"
 DEFER_SEQUENCE_BASELINES=0
 TEST_RUN=0
@@ -121,6 +126,8 @@ while [[ $# -gt 0 ]]; do
                          CONVTRAN_BATCH_SWEEP="$2"; shift 2 ;;
         --test-run|--deterministic-run|--final-run)
                          TEST_RUN=1; shift ;;
+        --allow-missing-deps)
+                         ALLOW_MISSING_DEPS=1; shift ;;
         --dry-run)       DRY_RUN=1;          shift ;;
         -h|--help)
             awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 && !/^#/ { exit }' "$0"
@@ -313,6 +320,22 @@ log "Results dir : $RESULTS"
 log "Features CSV: $FEATURES_CSV"
 log "Figures dir : $FIGURES_DIR"
 log "Motion feature count: $FEATURE_COUNT"
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+MISSING_DEPS=""
+for mod in numpy scipy pandas sklearn xgboost matplotlib torch aeon numba; do
+    "$PYTHON" -c "import $mod" >/dev/null 2>&1 || MISSING_DEPS+="$mod "
+done
+if [[ -n "$MISSING_DEPS" ]]; then
+    if [[ "$ALLOW_MISSING_DEPS" -eq 1 || "$DRY_RUN" -eq 1 ]]; then
+        warn "Missing Python packages: ${MISSING_DEPS% } — steps that need them will be skipped"
+    else
+        err "Missing Python packages: ${MISSING_DEPS% }"
+        err "Install them with: $PYTHON -m pip install -r requirements.txt"
+        err "or re-run with --allow-missing-deps to skip the steps that need them."
+        exit 1
+    fi
+fi
 
 if "$PYTHON" -c "import xgboost" >/dev/null 2>&1; then
     XGBOOST_AVAILABLE=1
@@ -564,7 +587,11 @@ if needs_run_with_deps "$STEP" 3 "$FEATURES_CSV" "$SPLITS_CSV" \
         --output-dir   "$RESULTS" \
         --n-jobs       "$PIPELINE_MODEL_N_JOBS" \
         --models "${TABULAR_MODELS[@]}"
-    mark_done "$STEP"
+    if [[ "$XGBOOST_AVAILABLE" -eq 1 ]]; then
+        mark_done "$STEP"
+    else
+        warn "  $STEP not checkpointed — it will run again once xgboost is installed"
+    fi
 fi
 
 run_phase3_sequence_baselines() {
@@ -576,7 +603,6 @@ run_phase3_sequence_baselines() {
         if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
             warn "PyTorch not found in '$PYTHON' — skipping 1D-CNN"
             warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
-            mark_done "$STEP"
         else
             FCN_ARGS=(
                 --tracks-dir "$TRACKS_DIR"
@@ -603,7 +629,6 @@ run_phase3_sequence_baselines() {
         if ! "$PYTHON" -c "import aeon" >/dev/null 2>&1; then
             warn "aeon not found in '$PYTHON' — skipping miniROCKET"
             warn "To enable: $PYTHON -m pip install -r requirements.txt"
-            mark_done "$STEP"
         else
             run_cmd "$PYTHON" src/train_rocket.py \
                 --tracks-dir "$TRACKS_DIR" \
@@ -626,7 +651,6 @@ run_phase3_sequence_baselines() {
         if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
             warn "PyTorch not found in '$PYTHON' — skipping ConvTran"
             warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
-            mark_done "$STEP"
         else
             CONVTRAN_ARGS=(
                 --tracks-dir "$TRACKS_DIR"
@@ -667,7 +691,6 @@ run_phase3_sequence_baselines() {
             if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
                 warn "PyTorch not found in '$PYTHON' — skipping ConvTran batch-size sweep"
                 warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
-                mark_done "$STEP"
             else
                 # IFS is $'\n\t' script-wide, so an unquoted expansion would NOT
                 # split on spaces. Split explicitly with IFS=' ' for this read.
@@ -907,11 +930,9 @@ if needs_run_with_deps "$STEP" 4 \
     XGB_JSON="$RESULTS/prauc_protocol/xgboost_prauc/results.json"
     if [[ "$XGBOOST_AVAILABLE" -eq 0 ]]; then
         warn "xgboost not found in '$PYTHON' — skipping cross-farm XGBoost"
-        mark_done "$STEP"
     elif [[ "$DRY_RUN" -eq 0 && ! -f "$XGB_JSON" ]]; then
         warn "Phase 3 XGBoost result missing — skipping cross-farm XGBoost"
         warn "Run with xgboost installed and --from-phase 3 to generate it."
-        mark_done "$STEP"
     else
         log "4.1  Running Farm A→B and B→A transfer …"
         if [[ "$DRY_RUN" -eq 1 && ! -f "$XGB_JSON" ]]; then
@@ -1005,11 +1026,9 @@ if needs_run_with_deps "$STEP" 5 \
     XGB_JSON="$RESULTS/prauc_protocol/xgboost_prauc/results.json"
     if [[ "$XGBOOST_AVAILABLE" -eq 0 ]]; then
         warn "xgboost not found in '$PYTHON' — skipping XGBoost ablation studies"
-        mark_done "$STEP"
     elif [[ "$DRY_RUN" -eq 0 && ! -f "$XGB_JSON" ]]; then
         warn "Phase 3 XGBoost result missing — skipping XGBoost ablation studies"
         warn "Run with xgboost installed and --from-phase 3 to generate it."
-        mark_done "$STEP"
     else
         if [[ "$DRY_RUN" -eq 1 && ! -f "$XGB_JSON" ]]; then
         warn "Phase 3 XGBoost result missing in dry-run — using placeholder params"
@@ -1044,18 +1063,20 @@ if needs_run_with_deps "$STEP" 5 \
     "$REPO/src/figures/plot_group_loo.py" \
     "$REPO/run_pipeline.sh"; then
     if [[ "$DRY_RUN" -eq 0 && ! -f "$RESULTS/ablation/group_loo_ablation.csv" ]]; then
-        warn "Group LOO ablation results missing — skipping ablation plots"
+        warn "Group LOO ablation results missing — skipping ablation plot"
     else
         log "5.2  Plotting group leave-one-out ablation effects …"
         mkdir -p "$FIGURES_DIR"
-        run_cmd "$PYTHON" src/figures/plot_group_loo.py \
+        if run_cmd "$PYTHON" src/figures/plot_group_loo.py \
             --input-csv  "$RESULTS/ablation/group_loo_ablation.csv" \
             --output-csv "$RESULTS/ablation/group_loo_prauc_top_positive_negative.csv" \
             --output-png "$FIGURES_DIR/group_loo_prauc_top_positive_negative.png" \
-            --metric pr_auc \
-            || warn "Group LOO PR-AUC plot failed — continuing"
+            --metric pr_auc; then
+            mark_done "$STEP"
+        else
+            warn "Group LOO plot failed — continuing; it will be retried on the next run"
+        fi
     fi
-    mark_done "$STEP"
 fi
 
 # 5.3 Trajectory figures (class overlays + best-session spaghetti)
@@ -1068,18 +1089,23 @@ if needs_run_with_deps "$STEP" 5 \
     "$REPO/run_pipeline.sh"; then
     log "5.3  Plotting trajectory figures …"
     mkdir -p "$FIGURES_DIR"
+    FIGURES_OK=1
     run_cmd "$PYTHON" src/figures/plot_class_trajectory_overlays.py \
         --splits-csv "$SPLITS_CSV" \
         --tracks-dir "$TRACKS_DIR" \
         --output-dir "$FIGURES_DIR" \
-        || warn "Class-overlay figure failed — continuing"
+        || { warn "Class-overlay figure failed — continuing"; FIGURES_OK=0; }
     run_cmd "$PYTHON" src/figures/plot_session_trajectories.py \
         --splits-csv "$SPLITS_CSV" \
         --tracks-dir "$TRACKS_DIR" \
         --output-dir "$FIGURES_DIR" \
         --rank 1 \
-        || warn "Session trajectory figure failed — continuing"
-    mark_done "$STEP"
+        || { warn "Session trajectory figure failed — continuing"; FIGURES_OK=0; }
+    if [[ "$FIGURES_OK" -eq 1 ]]; then
+        mark_done "$STEP"
+    else
+        warn "  $STEP not checkpointed — the trajectory figures will be retried on the next run"
+    fi
 fi
 
 ok "Phase 5 complete"
