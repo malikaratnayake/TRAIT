@@ -15,8 +15,8 @@
 #                                  held-out test set.
 #   Phase 3  Model comparison    — majority baseline, Logistic Regression,
 #                                  Random Forest, XGBoost, 1D-CNN, miniROCKET and
-#                                  ConvTran; comparison table and
-#                                  precision–recall curves.
+#                                  ConvTran; comparison table, precision–recall
+#                                  curves and XGBoost operating points.
 #   Phase 4  Cross-farm          — XGBoost within each farm and across farms
 #                                  (A→B, B→A), with no adaptation.
 #   Phase 5  Ablations, figures  — cumulative and single-domain ablations,
@@ -594,12 +594,26 @@ if needs_run_with_deps "$STEP" 3 "$FEATURES_CSV" "$SPLITS_CSV" \
     fi
 fi
 
+# 3.3 XGBoost operating points at alternative thresholds (Supp. Table 10)
+STEP="p3_operating_points"
+XGB_DIR="$RESULTS/prauc_protocol/xgboost_prauc"
+if needs_run_with_deps "$STEP" 3 "$XGB_DIR/predictions.csv" "$XGB_DIR/results.json" \
+    "$REPO/src/operating_points.py" "$REPO/run_pipeline.sh"; then
+    if [[ "$DRY_RUN" -eq 0 && ! -f "$XGB_DIR/predictions.csv" ]]; then
+        warn "XGBoost predictions missing — skipping operating points"
+    else
+        log "3.3  Computing XGBoost operating points …"
+        run_cmd "$PYTHON" src/operating_points.py --results-dir "$RESULTS"
+        mark_done "$STEP"
+    fi
+fi
+
 run_phase3_sequence_baselines() {
-    # 3.3 1D-CNN with PR-AUC early stopping
+    # 3.4 1D-CNN with PR-AUC early stopping
     STEP="p3_fcn"
     if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
         "$REPO/src/train_fcn.py" "$REPO/src/utils/smoothing.py" "$REPO/run_pipeline.sh"; then
-        log "3.3  Training 1D-CNN with PR-AUC early stopping …"
+        log "3.4  Training 1D-CNN with PR-AUC early stopping …"
         if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
             warn "PyTorch not found in '$PYTHON' — skipping 1D-CNN"
             warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
@@ -621,11 +635,11 @@ run_phase3_sequence_baselines() {
         fi
     fi
 
-    # 3.4 miniROCKET with PR-AUC ridge selection
+    # 3.5 miniROCKET with PR-AUC ridge selection
     STEP="p3_rocket"
     if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
         "$REPO/src/train_rocket.py" "$REPO/src/utils/smoothing.py" "$REPO/run_pipeline.sh"; then
-        log "3.4  Training miniROCKET with PR-AUC ridge selection …"
+        log "3.5  Training miniROCKET with PR-AUC ridge selection …"
         if ! "$PYTHON" -c "import aeon" >/dev/null 2>&1; then
             warn "aeon not found in '$PYTHON' — skipping miniROCKET"
             warn "To enable: $PYTHON -m pip install -r requirements.txt"
@@ -642,12 +656,12 @@ run_phase3_sequence_baselines() {
         fi
     fi
 
-    # 3.4c ConvTran (camera-ready revision addition)
+    # 3.6 ConvTran with PR-AUC early stopping
     STEP="p3_convtran"
     if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
         "$REPO/src/train_convtran.py" "$REPO/src/train_fcn.py" \
         "$REPO/run_pipeline.sh"; then
-        log "3.4c  Training ConvTran (Foumani et al., DMKD 2024) with PR-AUC early stopping …"
+        log "3.6  Training ConvTran (Foumani et al., DMKD 2024) with PR-AUC early stopping …"
         if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
             warn "PyTorch not found in '$PYTHON' — skipping ConvTran"
             warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
@@ -675,7 +689,7 @@ run_phase3_sequence_baselines() {
         fi
     fi
 
-    # 3.4d ConvTran batch-size sensitivity sweep — SUPPLEMENTARY, opt-in.
+    # 3.7 ConvTran batch-size sensitivity sweep (Supp. Table 11) — opt-in.
     # Only runs when --convtran-batch-sweep is given, so a normal pipeline run
     # is unaffected. Delegates to src/convtran_batch_size_study.py (which
     # handles per-batch-size output dirs, resume, per-run failure isolation,
@@ -687,7 +701,7 @@ run_phase3_sequence_baselines() {
         if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
             "$REPO/src/train_convtran.py" "$REPO/src/convtran_batch_size_study.py" \
             "$REPO/run_pipeline.sh"; then
-            log "3.4d  ConvTran batch-size sweep (supplementary): [$CONVTRAN_BATCH_SWEEP] …"
+            log "3.7  ConvTran batch-size sweep (supplementary): [$CONVTRAN_BATCH_SWEEP] …"
             if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
                 warn "PyTorch not found in '$PYTHON' — skipping ConvTran batch-size sweep"
                 warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
@@ -720,7 +734,7 @@ run_phase3_sequence_baselines() {
 }
 
 run_phase3_summary_outputs() {
-    # 3.5 Comparison table (CSV)
+    # 3.8 Comparison table (CSV)
     STEP="p3_compare"
     if needs_run_with_deps "$STEP" 3 \
         "$RESULTS/trivial/trivial_results.json" \
@@ -729,7 +743,7 @@ run_phase3_summary_outputs() {
         "$RESULTS/rocket_prauc/rocket_results.csv" \
         "$RESULTS/convtran_prauc/convtran_results.csv" \
         "$REPO/run_pipeline.sh"; then
-        log "3.5  Building model comparison table …"
+        log "3.8  Building model comparison table …"
 	run_cmd "$PYTHON" - <<'PYEOF'
 import json, math, sys, os
 from pathlib import Path
@@ -765,6 +779,7 @@ def read_model(path, model_key=None):
         "pr_auc":          m.get("pr_auc"),
         "pr_auc_ci_lo":    pr_ci.get("lo"),
         "pr_auc_ci_hi":    pr_ci.get("hi"),
+        "threshold":       None,
         "latency_mean_ms": lat.get("latency_mean_ms"),
     }
 
@@ -780,12 +795,8 @@ prauc_csv = R / "prauc_protocol" / "prauc_protocol_comparison.csv"
 if prauc_csv.exists():
     pdf = pd.read_csv(prauc_csv)
     for _, row in pdf.iterrows():
-        model = str(row.get("model", ""))
-        slug  = str(row.get("slug", ""))
-        if "Generic traj." in model or slug.startswith("generic_trajectory"):
-            continue
         rows.append({
-            "Model":           model,
+            "Model":           str(row.get("model", "")),
             "n_features":      row.get("n_features", "125"),
             "precision":       row.get("precision"),
             "recall":          row.get("recall"),
@@ -795,6 +806,7 @@ if prauc_csv.exists():
             "pr_auc":          row.get("pr_auc"),
             "pr_auc_ci_lo":    row.get("pr_auc_ci_lo"),
             "pr_auc_ci_hi":    row.get("pr_auc_ci_hi"),
+            "threshold":       row.get("threshold"),
             "latency_mean_ms": row.get("latency_mean_ms"),
         })
 
@@ -814,6 +826,7 @@ if fcn_csv.exists():
             "pr_auc":          row.get("pr_auc"),
             "pr_auc_ci_lo":    row.get("pr_auc_lo"),
             "pr_auc_ci_hi":    row.get("pr_auc_hi"),
+            "threshold":       row.get("threshold"),
             "latency_mean_ms": row.get("latency_mean_ms"),
         })
 
@@ -833,6 +846,7 @@ if rocket_csv.exists():
             "pr_auc":          row.get("pr_auc"),
             "pr_auc_ci_lo":    row.get("pr_auc_lo"),
             "pr_auc_ci_hi":    row.get("pr_auc_hi"),
+            "threshold":       row.get("threshold"),
             "latency_mean_ms": row.get("latency_mean_ms"),
         })
 
@@ -852,6 +866,7 @@ for label, csv_path in [("ConvTran", R / "convtran_prauc" / "convtran_results.cs
                 "pr_auc":          row.get("pr_auc"),
                 "pr_auc_ci_lo":    row.get("pr_auc_lo"),
                 "pr_auc_ci_hi":    row.get("pr_auc_hi"),
+                "threshold":       row.get("threshold"),
                 "latency_mean_ms": row.get("latency_mean_ms"),
             })
 
@@ -867,14 +882,14 @@ df.to_csv(out, index=False)
 # bootstrap resamples of the test set"). The CI column below reports the
 # PR-AUC CI, not the F1 CI, to match that convention. f1_ci_lo/f1_ci_hi are
 # still written to the saved CSV for anyone who wants the F1 interval too.
-print(f"\n  {'Model':<26} {'#Feat':>6} {'PR-AUC':>7}  "
-      f"{'95% CI (PR-AUC)':^20}  {'F1':>7} {'Rec':>7} {'Prec':>7} {'ms/samp':>8}")
-print("  " + "─" * 96)
+print(f"\n  {'Model':<36} {'#Feat':>6} {'PR-AUC':>7}  "
+      f"{'95% CI (PR-AUC)':^20}  {'τ':>6} {'F1':>7} {'Rec':>7} {'Prec':>7} {'ms/samp':>8}")
+print("  " + "─" * 113)
 for _, r in df.iterrows():
     ci = (f"[{fmt(r['pr_auc_ci_lo'])}–{fmt(r['pr_auc_ci_hi'])}]"
           if not nan(r.get("pr_auc_ci_lo")) else "          —         ")
-    print(f"  {str(r['Model']):<26} {str(r['n_features']):>6} "
-          f"{fmt(r['pr_auc']):>7}  {ci:^20}  "
+    print(f"  {str(r['Model']):<36} {str(r['n_features']):>6} "
+          f"{fmt(r['pr_auc']):>7}  {ci:^20}  {fmt(r.get('threshold'), '.3f'):>6} "
           f"{fmt(r['f1']):>7} {fmt(r['recall']):>7} {fmt(r['precision']):>7} "
           f"{fmt(r.get('latency_mean_ms'),'.3f'):>8}")
 print(f"\n  Saved → {out}")
@@ -882,7 +897,7 @@ PYEOF
         mark_done "$STEP"
     fi
 
-    # 3.6 Precision-recall curve figure
+    # 3.9 Precision-recall curve figure
     STEP="p3_pr_curves"
     if needs_run_with_deps "$STEP" 3 \
         "$RESULTS/trivial/majority_pr_curve.csv" \
@@ -890,10 +905,11 @@ PYEOF
         "$RESULTS/prauc_protocol/random_forest_prauc/random_forest_prauc_pr_curve.csv" \
         "$RESULTS/prauc_protocol/xgboost_prauc/xgboost_prauc_pr_curve.csv" \
         "$RESULTS/fcn_prauc/fcn_pr_auc_pr_curve.csv" \
+        "$RESULTS/rocket_prauc/minirocket_pr_auc_pr_curve.csv" \
         "$RESULTS/convtran_prauc/convtran_pr_auc_pr_curve.csv" \
         "$REPO/src/figures/plot_pr_curves.py" \
         "$REPO/run_pipeline.sh"; then
-        log "3.6  Plotting precision-recall curves (majority, LR, RF, XGBoost, 1D-CNN, miniROCKET, ConvTran) …"
+        log "3.9  Plotting precision-recall curves (majority, LR, RF, XGBoost, 1D-CNN, miniROCKET, ConvTran) …"
         mkdir -p "$FIGURES_DIR"
         run_cmd "$PYTHON" src/figures/plot_pr_curves.py \
             --results-dir "$RESULTS" \
@@ -1134,11 +1150,12 @@ log "  Phase 1  features       → $FEATURES_CSV"
 log "  Phase 2  splits         → $SPLITS_CSV"
 log "  Phase 3  comparison     → $RESULTS/phase3_model_comparison.csv"
 log "           PR-AUC fig     → $FIGURES_DIR/phase3_precision_recall_curves.png"
+log "           op. points     → $RESULTS/prauc_protocol/xgboost_prauc/operating_points.csv"
 log "           1D-CNN         → $RESULTS/fcn_prauc/fcn_results.csv"
 log "           miniROCKET     → $RESULTS/rocket_prauc/rocket_results.csv"
-log "           ConvTran        → $RESULTS/convtran_prauc/convtran_results.csv"
+log "           ConvTran       → $RESULTS/convtran_prauc/convtran_results.csv"
 if [[ -n "$CONVTRAN_BATCH_SWEEP" ]]; then
-log "           ConvTran sweep  → $RESULTS/convtran_batch_size_study/convtran_batch_size_summary.csv"
+log "           ConvTran sweep → $RESULTS/convtran_batch_size_study/convtran_batch_size_summary.csv"
 fi
 log "  Phase 4  cross-farm     → $RESULTS/cross_farm/cross_farm_results.csv"
 log "  Phase 5  ablation       → $RESULTS/ablation/"
