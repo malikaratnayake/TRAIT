@@ -2082,6 +2082,7 @@ def build_feature_table(
 # ===========================================================================
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options."""
     p = argparse.ArgumentParser(
         description="Phase 1 — Extract the 125 motion features from track CSVs."
     )
