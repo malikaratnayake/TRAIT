@@ -1,13 +1,17 @@
 """
 src/utils/metadata.py
 =====================
-Parse farm / station / date metadata from track filenames.
+Parse farm, location, station and recording time from track filenames.
 
-One canonical anonymized filename convention is supported:
+Track files are named
 
-  FarmX format:
     FarmA_L1_S10_250729_093716_100005000023.csv
-    Fields: farm=Farm{A|B}, location=L{N}, station=S{N}, date=YYMMDD, time=HHMMSS
+    Fields: farm=Farm{A|B}, location=L{N}, station=S{N}, date=YYMMDD,
+            time=HHMMSS, track ID
+
+The farm, location and station together (group_key, e.g. FarmA_L1_S10)
+identify a camera station; src/create_splits.py groups folds on it. None of
+these fields is used as a model feature.
 
 Public API
 ----------
@@ -45,15 +49,11 @@ _FARMX_RE = re.compile(
 def parse_filename(filename: str | Path) -> Optional[dict]:
     """Parse a track filename and return a metadata dict, or None on no match.
 
-    Farm identity
-    -------------
-    Farm A and Farm B are pseudonymous site labels.
-
     Returned dict keys
     ------------------
     farm_name   : str   'Farm_A' or 'Farm_B'
-    farm_id     : str   anonymized site-location ID, e.g. FarmA_L1
-    camera_unit : str   anonymized location-level identifier
+    farm_id     : str   farm and location, e.g. 'FarmA_L1'
+    camera_unit : str   same as farm_id (kept as a separate column)
     station_id  : str   e.g. 'S10' (as it appears in the filename)
     station_num : int   numeric station number
     date        : datetime.date
@@ -64,7 +64,6 @@ def parse_filename(filename: str | Path) -> Optional[dict]:
     """
     name = Path(filename).name
 
-    # --- FarmX_LY_SN canonical anonymized format ---
     m = _FARMX_RE.match(name)
     if m:
         raw_date = m.group("date")          # YYMMDD
@@ -146,12 +145,11 @@ def parse_dataframe(df: pd.DataFrame, filepath_col: str = "filepath") -> pd.Data
 
 
 # ---------------------------------------------------------------------------
-# CLI smoke-test
+# Quick self-check: python src/utils/metadata.py
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     test_cases = [
-        # Canonical anonymized format
         "FarmA_L1_S10_250101_093716_100005000023.csv",
         "FarmA_L2_S11_250101_110854_100079000000.csv",
         "FarmB_L1_S10_250201_092040_100001000000.csv",

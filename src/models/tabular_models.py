@@ -1,15 +1,33 @@
 """
-Phase 2 — PR-AUC model-selection protocol variants.
+src/models/tabular_models.py
+============================
+Phase 3 — Logistic Regression, Random Forest and XGBoost on the 125 features.
 
-These variants keep the held-out test protocol unchanged, but use a consistent
-selection rule across eligible non-neural baselines:
+All three models follow the same protocol (paper Sec. 4.1, Supp. Table 8):
 
-  - model / hyperparameter / early-stopping selection: validation PR-AUC
-  - decision threshold selection: validation or OOF F1
-  - final reporting: precision, recall, F1, PR-AUC, bootstrap CIs
+  - hyperparameters chosen by mean validation PR-AUC over folds 0–3
+    (XGBoost also early-stops on validation PR-AUC, 400-round cap)
+  - decision threshold chosen by maximising F1 on out-of-fold predictions
+  - final model refit on folds 0–3 and evaluated once on the held-out test
+    fold (fold 4): precision, recall, F1, PR-AUC with bootstrap CIs, latency
+  - class imbalance: balanced class weights (LR, RF) or scale_pos_weight set
+    from the training class ratio (XGBoost)
 
-Outputs are written under:
-  data/results/six_domain_v1/prauc_protocol/
+Outputs (under <output-dir>/prauc_protocol/)
+--------------------------------------------
+  prauc_protocol_comparison.csv          — one row per model (Table 3 rows)
+  <model>_prauc/results.json             — selected hyperparameters, threshold,
+                                           test metrics, CIs, latency
+  <model>_prauc/predictions.csv          — per-track test predictions
+  <model>_prauc/<model>_prauc_pr_curve.csv
+  <model>_prauc/model.pkl | model.ubj    — fitted model
+
+Usage
+-----
+  python src/models/tabular_models.py \\
+      --features-csv data/results/trait_results/track_features.csv \\
+      --splits-csv   data/splits_folds.csv \\
+      --output-dir   data/results/trait_results
 """
 
 from __future__ import annotations
@@ -38,12 +56,14 @@ N_BOOT = 1000
 
 
 def _pos_weight(y: np.ndarray) -> float:
+    """Negative-to-positive class ratio, used as XGBoost's scale_pos_weight."""
     n_pos = int(y.sum())
     n_neg = len(y) - n_pos
     return float(n_neg / n_pos) if n_pos > 0 else 1.0
 
 
 def _find_f1_threshold(y_true: np.ndarray, y_score: np.ndarray) -> tuple[float, float]:
+    """Return the threshold in [0.05, 0.95] (step 0.01) that maximises F1, and that F1."""
     best_thr, best_f1 = 0.5, -1.0
     for thr in np.arange(0.05, 0.96, 0.01):
         pred = (y_score >= thr).astype(int)
@@ -54,6 +74,7 @@ def _find_f1_threshold(y_true: np.ndarray, y_score: np.ndarray) -> tuple[float, 
 
 
 def _test_filenames(df: pd.DataFrame) -> list[str]:
+    """Filenames of the held-out test tracks, in the order get_test_split returns them."""
     return list(df.loc[df["split_role"] == "test", "filename"])
 
 
@@ -72,6 +93,11 @@ def _save_variant(
     extra: dict,
     filenames: list[str],
 ) -> dict:
+    """Score one fitted model on the test set and save its outputs.
+
+    Writes results.json, predictions.csv and the PR-curve CSV to
+    out_dir/<slug>/ and returns the summary row for the comparison table.
+    """
     y_pred = (y_score >= threshold).astype(int)
     metrics = compute_metrics(y_true, y_pred, y_score)
     ci = bootstrap_ci(y_true, y_pred, y_score, n_boot=N_BOOT, seed=SEED)
@@ -127,6 +153,7 @@ def _save_variant(
 
 
 def _fit_lr(X: np.ndarray, y: np.ndarray, C: float):
+    """Fit a standardised, class-balanced L2 logistic regression with inverse regularisation C."""
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
     model = LogisticRegression(
@@ -141,10 +168,12 @@ def _fit_lr(X: np.ndarray, y: np.ndarray, C: float):
 
 
 def _score_lr(scaler, model, X: np.ndarray) -> np.ndarray:
+    """Positive-class probabilities from a fitted scaler + logistic regression."""
     return model.predict_proba(scaler.transform(X))[:, 1]
 
 
 def run_lr(df: pd.DataFrame, feature_cols: list[str], out_dir: Path) -> dict:
+    """Select C by validation PR-AUC, tune the threshold, refit and evaluate on the test set."""
     print("\n── Logistic Regression — PR-AUC selection ─────────────────────")
     Cs = [0.01, 0.1, 1.0, 10.0, 100.0]
 
@@ -195,6 +224,7 @@ def run_lr(df: pd.DataFrame, feature_cols: list[str], out_dir: Path) -> dict:
 
 
 def _fit_rf(X: np.ndarray, y: np.ndarray, params: dict, n_jobs: int):
+    """Fit a class-balanced random forest with the given n_estimators / max_depth."""
     model = RandomForestClassifier(
         **params,
         class_weight="balanced",
@@ -211,6 +241,7 @@ def run_rf(
     out_dir: Path,
     n_jobs: int,
 ) -> dict:
+    """Grid-search the random forest by validation PR-AUC, tune the threshold and evaluate on the test set."""
     print("\n── Random Forest — PR-AUC selection ───────────────────────────")
     param_grid = [
         {"n_estimators": n, "max_depth": d}
@@ -276,6 +307,11 @@ def _fit_xgb(
     early_stop: bool = False,
     n_jobs: int = -1,
 ):
+    """Fit an XGBoost classifier.
+
+    scale_pos_weight is set from the training class ratio; with early_stop,
+    training stops after 20 rounds without improvement in validation PR-AUC.
+    """
     import xgboost as xgb
 
     kwargs = {
@@ -299,6 +335,7 @@ def _fit_xgb(
 
 
 def _best_n_estimators(model, fallback: int) -> int:
+    """Number of boosting rounds kept by early stopping (or the fallback if none)."""
     best_iteration = getattr(model, "best_iteration", None)
     if best_iteration is None:
         return int(fallback)
@@ -315,6 +352,12 @@ def _run_xgb_protocol(
     feature_set: str,
     n_jobs: int,
 ) -> dict:
+    """Grid-search XGBoost by validation PR-AUC, then refit and evaluate on the test set.
+
+    The number of boosting rounds for the final model is the median of the
+    early-stopping rounds across folds 0–3; the threshold maximises
+    out-of-fold F1.
+    """
     print(f"\n── {display_name} ─────────────────────────────────")
     param_grid = [
         {"max_depth": d, "learning_rate": lr, "n_estimators": n}
@@ -404,6 +447,7 @@ def run_xgb(
     out_dir: Path,
     n_jobs: int,
 ) -> dict:
+    """Run the XGBoost protocol on the 125-feature set."""
     return _run_xgb_protocol(
         df,
         feature_cols,
@@ -416,10 +460,11 @@ def run_xgb(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Phase 2 PR-AUC protocol model variants")
-    parser.add_argument("--features-csv", default="data/results/six_domain_v1/track_features.csv")
+    """Parse command-line options."""
+    parser = argparse.ArgumentParser(description="Phase 3 — Logistic Regression, Random Forest and XGBoost")
+    parser.add_argument("--features-csv", default="data/results/trait_results/track_features.csv")
     parser.add_argument("--splits-csv", default="data/splits_folds.csv")
-    parser.add_argument("--output-dir", default="data/results/six_domain_v1")
+    parser.add_argument("--output-dir", default="data/results/trait_results")
     parser.add_argument(
         "--n-jobs",
         type=int,
@@ -431,12 +476,13 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         choices=["lr", "rf", "xgb"],
         default=["lr", "rf", "xgb"],
-        help="Subset of PR-AUC protocol variants to train",
+        help="Subset of models to train (default: all three)",
     )
     return parser.parse_args()
 
 
 def main() -> None:
+    """Train the requested models and write prauc_protocol_comparison.csv."""
     args = parse_args()
     features_csv = Path(args.features_csv).expanduser().resolve()
     splits_csv = Path(args.splits_csv).expanduser().resolve()

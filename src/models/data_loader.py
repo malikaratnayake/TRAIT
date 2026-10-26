@@ -1,15 +1,13 @@
 """
 src/models/data_loader.py
-============================
-Shared data-loading utilities for all pipeline phases.
+=========================
+Feature hierarchy and data loading shared by Phases 3–5.
 
-Defines the 6-domain biologically-informed feature hierarchy (125 features,
-with time_of_day_bucket excluded) and exposes helper functions used across
-Phase 2–5 modules.
-
-Revision (2026-06-02): two redundant features removed — drift_consistency
-(identical to crw_persistence) and n_hairpin_reversals (identical event to
-uturn_rate). Contract reduced 127 → 125.
+Defines the 125 behaviour-informed motion features, organised into six
+domains and 32 subgroups (paper Table 2; definitions in Section 1 of the
+supplementary material), and the helpers that merge the feature table with
+the fold assignments and return train / validation / test / cross-farm
+arrays. Missing values are median-imputed using training rows only.
 
 Public API
 ----------
@@ -31,8 +29,6 @@ import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Domain 1 — Fundamental Locomotion Kinematics  (26 features)
-# The supplied six-domain specification lists the 23 dynamics features below.
-# Track duration/support completes the 125-feature motion contract here.
 # ---------------------------------------------------------------------------
 _DOMAIN1_DURATION = ["n_points", "duration_frames", "duration_sec"]
 _DOMAIN1_SPEED = ["mean_speed", "std_speed", "max_speed", "p90_speed", "cv_speed"]
@@ -126,7 +122,6 @@ _DOMAIN5_AERO = ["re_proxy"]
 
 # ---------------------------------------------------------------------------
 # Domain 6 — Behavioural State Organisation  (14 features)
-# NOTE: time_of_day_bucket is intentionally excluded from all feature lists.
 # ---------------------------------------------------------------------------
 _DOMAIN6_HOVER = [
     "hover_burst_transitions", "hover_transition_rate", "mean_hover_duration",
@@ -168,7 +163,7 @@ DOMAIN_GROUPS: dict[str, list[str]] = {
     ),
 }
 
-# Fine-grained biological subgroups — used for leave-one-group-out (LOO) ablation
+# The 32 subgroups — used for the leave-one-subgroup-out ablation (Supp. Table 12)
 FEATURE_GROUPS: dict[str, list[str]] = {
     # ── Domain 1 ────────────────────────────────────────────────────────────
     "d1_duration":       _DOMAIN1_DURATION,
@@ -210,9 +205,8 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "d6_takeoff":        _DOMAIN6_TAKEOFF,
 }
 
-# Canonical ordered list of all 125 motion-derived model features.
-# time_of_day_bucket is contextual metadata and intentionally excluded.
-# Note: radius_of_gyration removed (orphan name — feat_spatial outputs radius_gyration).
+# Canonical ordered list of all 125 motion-derived model features. No
+# recording metadata (time of day, station, farm) is used as a feature.
 ALL_FEATURES: list[str] = (
     DOMAIN_GROUPS["Domain1"]
     + DOMAIN_GROUPS["Domain2"]
@@ -316,7 +310,7 @@ def load_data(
               f"{'…' if len(all_nan) > 5 else ''}")
         feature_cols = [c for c in feature_cols if c not in all_nan]
 
-    # NOTE: NaNs are deliberately NOT imputed here. Median imputation is now
+    # NOTE: NaNs are deliberately NOT imputed here. Median imputation is
     # performed inside the split helpers (get_fold_split / get_test_split /
     # get_cross_farm_split) using *training-row* medians only, so the held-out
     # validation / test / cross-farm partitions never contribute to the

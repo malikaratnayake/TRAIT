@@ -1,7 +1,10 @@
 """
 src/models/evaluate.py
-=========================
-Shared evaluation utilities for Phase 2.
+======================
+Evaluation utilities shared by the classifiers in Phases 3–5: test metrics
+(precision, recall, F1, MCC, PR-AUC, ROC-AUC), 95% bootstrap confidence
+intervals over test-set resamples, and single-sample inference latency
+(mean over 500 timed calls after 50 warm-up calls).
 
 Public API
 ----------
