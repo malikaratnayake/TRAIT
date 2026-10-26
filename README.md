@@ -1,11 +1,251 @@
 # TRAIT — Trajectory Recognition for Automated Insect Tagging
 
-TRAIT is a reproducible pipeline for classifying insect trajectories recorded by camera traps. Given raw (x, y) centroid track CSV files, it applies Savitzky-Golay smoothing, extracts 125 biologically-informed motion features across six domains, and trains and evaluates multiple classifiers.
+TRAIT classifies 2D centroid tracks from camera traps as **insect** or **not insect** using
+only motion. Each track is gap-filled and smoothed, described by 125 interpretable,
+behaviour-informed motion features organised into six domains, and classified with
+XGBoost. No appearance information, image data or GPU is required.
 
-This repository accompanies the paper:
+This repository contains the code and instructions to reproduce all results in:
 
-> **Seeing Insects Through Motion: Behaviour-Informed Trajectory Classification for Camera-Trap Pollinator Monitoring** — *[Authors anonymised for double-blind review]*, *WACV 2027*
-> DOI: [to be added upon acceptance]
+> Malika Nisal Ratnayake and Alan Dorin.
+> **Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps.**
+> *IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)*, 2027.
+
+On a held-out, station-disjoint test set, XGBoost on the 125 features reaches
+**PR-AUC 0.929** and **F1 0.866** at 0.53 ms per track on a single CPU thread, ahead of the
+1D-CNN, miniROCKET and ConvTran sequence baselines trained on the same trajectories.
+
+---
+
+## Contents
+
+- [Dataset](#dataset)
+- [Method overview](#method-overview)
+- [Installation](#installation)
+- [Reproducing the paper](#reproducing-the-paper)
+- [Where each result comes from](#where-each-result-comes-from)
+- [Supplementary studies](#supplementary-studies)
+- [Repository structure](#repository-structure)
+- [Citation](#citation)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
+---
+
+## Dataset
+
+The dataset contains 28,295 manually annotated 2D centroid tracks from two commercial
+blueberry farms in Australia (Farm A and Farm B), covering eight semi-protected cropping
+tunnels and 153 camera recording stations. Videos were recorded at 30 fps and
+1920 × 1080 pixels by a track-mounted robotic monitoring platform with the camera
+70–100 cm from the crop, and processed with Polytrack (Ratnayake et al., IJCV 2023)
+to extract one CSV per track.
+
+| Subset       | Stations | Tracks | Insect | Not insect |
+|--------------|---------:|-------:|-------:|-----------:|
+| Farm A       | 117      | 18,821 | 2,194  | 16,627     |
+| Farm B       | 36       | 9,474  | 1,450  | 8,024      |
+| **Total**    | **153**  | **28,295** | **3,644** | **24,651** |
+| Train/val (folds 0–3) | 122 | 22,839 | 2,846 | 19,993 |
+| Test (fold 4) | 31      | 5,456  | 798    | 4,658      |
+
+Each track was labelled by overlaying it on its video clip. `insect` covers honeybees and
+other insects. `not_insect` covers wind-blown vegetation, shadows, camera vibration,
+birds and people. When a track contained several motion sources, it was given the label
+of the source present for more than 50% of its duration.
+
+### Download
+
+The dataset is released under CC BY 4.0 at **[dataset DOI — to be added]**. Download it
+and extract it into `data/` so the layout is:
+
+```
+data/
+├── tracks/                    # 28,295 CSV files, columns: nframe, x, y (pixels)
+└── track_classification.csv   # columns: filepath, label (insect | not_insect)
+```
+
+### File naming
+
+```
+FarmA_L1_S10_250729_093716_100005000023.csv
+│     │  │   │      │      └─ track ID
+│     │  │   │      └─ recording start time (HHMMSS)
+│     │  │   └─ recording date (YYMMDD)
+│     │  └─ station within the location
+│     └─ location (cropping tunnel) within the farm
+└─ farm (A or B)
+```
+
+The farm, location and station together (`FarmA_L1_S10`) identify a camera station.
+They are used to build station-disjoint splits but are never used as model inputs.
+
+---
+
+## Method overview
+
+1. **Gap filling and smoothing.** Missed detections are filled by linear interpolation
+   over the frame index. Tracks shorter than five frames are discarded. Coordinates are
+   then smoothed with a Savitzky–Golay filter (11-frame window, polynomial order 2). For
+   shorter tracks the largest valid odd window is used.
+2. **Feature extraction.** 125 features in six domains and 32 subgroups are computed from
+   the smoothed track. The wingbeat-residual features also use the raw coordinates.
+   Full definitions and equations are in Section 1 of the supplementary material, and
+   the feature names in the code match those tables.
+
+   | Domain | Focus | Features | Subgroups |
+   |---|---|---:|---|
+   | D1 | Fundamental locomotion kinematics | 26 | track support, speed statistics, dynamics, speed distribution, motion intensity |
+   | D2 | Spatial occupancy and path geometry | 19 | path geometry, spatial spread, exploration, diffusion, sinuosity |
+   | D3 | Flight rhythm, oscillation and biomechanics | 30 | horizontal and vertical oscillation, XY coherence, global spectral, wingbeat residuals, mean reversion |
+   | D4 | Navigation, orientation and search behaviour | 16 | directionality, heading use, zigzag and casting, circling, directional bias |
+   | D5 | Sensorimotor control and manoeuvrability | 20 | turning, saccades, fixation structure, manoeuvrability, speed scaling, Lévy statistics, aerodynamics |
+   | D6 | Behavioural state organisation | 14 | hover–burst, stops, landing, takeoff |
+
+3. **Station-disjoint evaluation.** Tracks are split into five folds with
+   `StratifiedGroupKFold`, grouped by camera station and stratified by farm location and
+   class. A deterministic seed search over 100 candidates selects the most balanced split
+   (`random_state = 47`). Fold 4 is the held-out test set. It is used once for final
+   evaluation and never for model selection, early stopping or threshold tuning.
+4. **Classification.** Logistic Regression, Random Forest and XGBoost are trained on the
+   features. The 1D-CNN (FCN), miniROCKET and ConvTran baselines are trained on the same
+   gap-filled, smoothed trajectories, using four channels (normalised x, y and speed, and
+   heading change) padded or truncated to 512 steps. Hyperparameters and early stopping
+   use validation PR-AUC. Each model's decision threshold maximises validation or
+   out-of-fold F1 and is then fixed for testing.
+
+---
+
+## Installation
+
+Python 3.10 or later is required. The pinned versions in `requirements.txt` are the
+versions used for the paper.
+
+```bash
+git clone https://github.com/malikaratnayake/TRAIT.git
+cd TRAIT
+python3.10 -m venv trait-env
+source trait-env/bin/activate          # Windows: trait-env\Scripts\activate
+python -m pip install -r requirements.txt
+```
+
+Check that every dependency imports before starting a long run:
+
+```bash
+python -c "import numpy, scipy, pandas, sklearn, xgboost, matplotlib, torch, aeon; print('OK')"
+```
+
+If pip cannot find SciPy 1.15.3, the environment is using Python 3.9 or older. Recreate
+it with Python 3.10 or later.
+
+---
+
+## Reproducing the paper
+
+Run the whole pipeline in deterministic mode, as used for the paper:
+
+```bash
+bash run_pipeline.sh --fps 30 --test-run --run-name paper
+```
+
+Outputs are written to `data/results/paper/`. `--test-run` runs every model on one CPU
+thread, uses deterministic PyTorch with seed 42, and keeps the 1D-CNN and ConvTran on the
+CPU. This is the configuration behind the reported results and latencies (Linux, 16 GB
+RAM, CPU only). It is slow, so plan for a long run. Without `--test-run`, model fitting
+uses all available cores and is faster, but the last decimal places of some results may
+differ.
+
+Each step writes a checkpoint when it finishes. Re-running the same command skips
+completed steps, so an interrupted run can simply be restarted.
+
+| Option | Effect |
+|---|---|
+| `--fps 30` | Frame rate used for feature extraction. Required on the first run, then cached in `data/pipeline.cfg`. |
+| `--run-name NAME` | Write results to `data/results/NAME/`. |
+| `--test-run` | Deterministic, single-threaded, CPU-only mode used for the paper. |
+| `--from-phase N` | Re-run from phase N (1–5) onwards. |
+| `--overwrite-results` | Delete the run folder and start again. |
+| `--dry-run` | Print the commands without running them. |
+| `-h`, `--help` | List all options. |
+
+The pipeline has five phases:
+
+| Phase | What it does | Script(s) |
+|---|---|---|
+| 1 | Gap filling, smoothing and extraction of the 125 features | `src/generate_features.py` |
+| 2 | Station-disjoint five-fold splits | `src/create_splits.py` |
+| 3 | Train and test all models; comparison table and PR curves | `src/models/`, `src/train_fcn.py`, `src/train_rocket.py`, `src/train_convtran.py` |
+| 4 | Within-farm and cross-farm generalisation (XGBoost) | `src/cross_farm.py` |
+| 5 | Domain, subgroup and feature-level ablations; trajectory figures | `src/ablation.py`, `src/figures/` |
+
+### Expected results
+
+Held-out test set (fold 4, 5,456 tracks, 14.6% insect). Latencies depend on the hardware.
+
+| Model | PR-AUC (95% CI) | τ | F1 | Recall | Precision | Latency (ms) |
+|---|---|---:|---:|---:|---:|---:|
+| Majority baseline | 0.146 (0.138–0.155) | – | 0.000 | 0.000 | 0.000 | 0.18 |
+| Logistic Regression | 0.908 (0.892–0.923) | 0.76 | 0.839 | 0.846 | 0.832 | 0.18 |
+| Random Forest | 0.919 (0.904–0.933) | 0.28 | 0.853 | 0.846 | 0.861 | 12.49 |
+| **XGBoost** | **0.929 (0.915–0.942)** | 0.53 | **0.866** | 0.833 | **0.902** | 0.53 |
+| 1D-CNN (FCN) | 0.848 (0.824–0.871) | 0.86 | 0.776 | 0.721 | 0.839 | 5.35 |
+| miniROCKET | 0.817 (0.794–0.841) | 0.30 | 0.738 | 0.772 | 0.707 | 6.07 |
+| ConvTran | 0.847 (0.823–0.872) | 0.88 | 0.781 | 0.724 | 0.848 | 19.66 |
+
+---
+
+## Where each result comes from
+
+All paths are relative to `data/results/<run-name>/` unless they start with `data/`.
+
+| Paper item | Output |
+|---|---|
+| Table 1 — dataset summary | `data/split_statistics.csv` |
+| Figure 2 — all tracks from one recording | `figures/session_trajectories_rank1.png` |
+| Figure 3 — class-conditional trajectory overlays | `figures/class_trajectory_overlays.png` |
+| Table 3 — model comparison | `phase3_model_comparison.csv` |
+| Figure 4 — precision–recall curves | `figures/phase3_precision_recall_curves.png` |
+| Table 4 — within- and cross-farm results | `cross_farm/cross_farm_results.csv` |
+| Table 5 — cumulative domain ablation | `ablation/domain_ablation_results.csv` |
+| Table 6 — single-domain ablation | `ablation/domain_only_results.csv` |
+| Supp. Table 8 — selected hyperparameters | `prauc_protocol/*/results.json` (LR, RF, XGBoost); `fcn_prauc/fcn_results.csv`, `rocket_prauc/rocket_results.csv`, `convtran_prauc/convtran_results.csv` |
+| Supp. Table 9 — threshold robustness across farms | `cross_farm_threshold_study/cross_farm_threshold_summary.csv` (see below) |
+| Supp. Table 10 — XGBoost operating points | `prauc_protocol/xgboost_prauc/operating_points.csv` |
+| Supp. Table 11 — ConvTran batch-size sensitivity | `convtran_batch_size_study/convtran_batch_size_summary.csv` (see below) |
+| Supp. Table 12 — leave-one-subgroup-out ablation | `ablation/group_loo_ablation.csv` |
+| Supp. Figure 1 — largest subgroup contributions | `figures/group_loo_prauc_top_positive_negative.png` |
+| Supp. Table 13 — permutation feature importance | `ablation/feature_importance.csv` |
+
+The features for every track are in `track_features.csv`, and the fold assignments in
+`data/splits_folds.csv`.
+
+---
+
+## Supplementary studies
+
+These two studies are not part of a default run.
+
+**Threshold robustness across farms (Supp. Table 9).** Retrains the Phase 4 XGBoost
+models and compares F1 at the fixed threshold (τ = 0.53) with F1 at each evaluation's own
+best threshold. Run it after the pipeline has finished:
+
+```bash
+python src/cross_farm_threshold_study.py \
+    --features-csv data/results/paper/track_features.csv \
+    --splits-csv   data/splits_folds.csv \
+    --output-dir   data/results/paper
+```
+
+**ConvTran batch-size sensitivity (Supp. Table 11).** The reported ConvTran is trained
+with batch size 128, matching the other sequence baselines, whereas the published ConvTran
+recipe uses 16. This study retrains ConvTran at several batch sizes. Each batch size is a
+full training run, and smaller batches take longer. Results go to their own folder, and
+the reported ConvTran result is not changed.
+
+```bash
+bash run_pipeline.sh --fps 30 --test-run --run-name paper --from-phase 3 \
+    --convtran-batch-sweep "16 32 64 96 128"
+```
 
 ---
 
@@ -13,330 +253,65 @@ This repository accompanies the paper:
 
 ```
 TRAIT/
-├── run_pipeline.sh                    # Original end-to-end pipeline driver (Phases 1–5)
-├── run_pipeline_review.sh             # Camera-ready revision pipeline — mirrors
-│                                       # run_pipeline.sh plus a sequence-baseline
-│                                       # preprocessing-parity fix and two new
-│                                       # baselines (Transformer, ConvTran). Use this
-│                                       # one; it supersedes run_pipeline.sh.
-├── preflight_check.sh                 # Verify all optional deps (torch/aeon/xgboost)
-│                                       # are importable before a long run — missing
-│                                       # ones are skipped silently by design, so run
-│                                       # this first
-├── data/                              # Dataset included in this bundle (see "Dataset")
-│   ├── tracks/                        # 28,295 raw track CSVs (Farm A + Farm B)
-│   └── track_classification.csv       # filepath, label (insect / not_insect)
+├── run_pipeline.sh                     # Runs the full pipeline (Phases 1–5)
+├── clean.sh                            # Deletes generated outputs (dry run unless --confirm)
+├── requirements.txt                    # Pinned dependencies used for the paper
+├── data/                               # Put the downloaded dataset here
 └── src/
-    ├── generate_features.py           # Phase 1: SG smoothing + 125-feature extraction
-    ├── create_splits.py               # Phase 2: station-disjoint grouped CV splits
-    ├── models/                        # Phase 3: model training and evaluation utilities
-    │   ├── data_loader.py             # Feature loading, fold/cross-farm splitting
-    │   ├── evaluate.py                # Metrics, bootstrap CI, latency measurement
-    │   ├── majority_baseline.py       # Majority baseline trainer
-    │   └── tabular_models.py          # LR, RF, XGBoost with PR-AUC selection
-    ├── train_fcn.py                   # Phase 3: 1D-CNN baseline
-    ├── train_rocket.py                # Phase 3: miniROCKET baseline
-    ├── train_transformer.py           # Phase 3: Transformer encoder baseline
-    ├── train_convtran.py              # Phase 3: ConvTran baseline (Foumani et al. 2024)
-    ├── cross_farm.py                  # Phase 4: cross-farm generalisation
-    ├── cross_farm_threshold_study.py  # Supplementary: cross-farm threshold sensitivity
-    │                                   # (run manually)
-    ├── convtran_batch_size_study.py   # Supplementary: ConvTran batch-size sensitivity
-    │                                   # (pipeline step 3.4d via
-    │                                   #  --convtran-batch-sweep, or standalone)
-    ├── ablation.py                    # Phase 5: domain and group ablation studies
+    ├── generate_features.py            # Phase 1: gap filling, smoothing, 125 features
+    ├── create_splits.py                # Phase 2: station-disjoint five-fold splits
+    ├── models/
+    │   ├── data_loader.py              # Feature hierarchy (6 domains, 32 subgroups), data loading
+    │   ├── evaluate.py                 # Metrics, bootstrap confidence intervals, latency
+    │   ├── majority_baseline.py        # Majority-class baseline
+    │   └── tabular_models.py           # Logistic Regression, Random Forest, XGBoost
+    ├── train_fcn.py                    # 1D-CNN (FCN) and shared sequence preprocessing
+    ├── train_rocket.py                 # miniROCKET
+    ├── train_convtran.py               # ConvTran
+    ├── cross_farm.py                   # Phase 4: within- and cross-farm evaluation
+    ├── ablation.py                     # Phase 5: ablations and permutation importance
+    ├── operating_points.py             # XGBoost operating points (Supp. Table 10)
+    ├── cross_farm_threshold_study.py   # Threshold robustness (Supp. Table 9)
+    ├── convtran_batch_size_study.py    # ConvTran batch-size sweep (Supp. Table 11)
     ├── figures/
-    │   ├── plot_pr_curves.py          # Phase 3: precision-recall curves figure
-    │   └── plot_group_loo.py          # Phase 5: group leave-one-out figure
+    │   ├── plot_session_trajectories.py        # Figure 2
+    │   ├── plot_class_trajectory_overlays.py   # Figure 3
+    │   ├── plot_pr_curves.py                   # Figure 4
+    │   └── plot_group_loo.py                   # Supp. Figure 1
     └── utils/
-        ├── smoothing.py               # Savitzky-Golay smoothing utilities
-        └── metadata.py                # Track filename parser (anonymized site/station/date)
+        ├── smoothing.py                # Gap filling and Savitzky–Golay smoothing
+        └── metadata.py                 # Parses farm, location and station from file names
 ```
 
----
-
-## Dataset
-
-The dataset consists of 28,295 manually annotated 2D centroid trajectory recordings from two geographically separated sites. `Farm A` and `Farm B` are pseudonymous site labels; raw site identities are not included in this repository.
-
-| Site   | Stations | Tracks |
-|--------|----------|--------|
-| Farm A | 117      | 18,821 |
-| Farm B | 36       | 9,474  |
-| **Total** | **153** | **28,295** |
-
-Insect prevalence is 12.9% across the full dataset. Each track is a short CSV of `(nframe, x, y)` pixel detections produced by a camera-trap system.
-
-### Availability
-
-The full dataset is **included in this bundle** under `data/`, so the pipeline runs without any additional download:
-
-```
-data/
-├── tracks/                  # One CSV per track (nframe, x, y)
-└── track_classification.csv # filepath, label  (insect / not_insect)
-```
-
-It is also archived (CC BY 4.0) at the anonymised link below for public reference:
-
-> https://figshare.com/s/03bd981a356bfc62584d
-
-Track filenames follow the canonical format:
-
-```
-FarmA_L1_S10_YYMMDD_HHMMSS_TRACKID.csv
-```
-
-where `Farm{A|B}` is the pseudonymous site, `L{N}` the anonymized location, `S{N}` the trap station, and `TRACKID` a unique identifier.
-
----
-
-## Feature hierarchy
-
-TRAIT extracts 125 intrinsic motion features organised into six biological domains. No recording metadata (time of day, station ID, site identity) is used by any classifier.
-
-| Domain | # Features | Description |
-|--------|-----------|-------------|
-| D1 | 26 | Fundamental locomotion kinematics (speed, acceleration, jerk) |
-| D2 | 19 | Spatial occupancy and path geometry (hull area, MSD, sinuosity) |
-| D3 | 30 | Flight rhythm, oscillation and biomechanics (spectral, residuals) |
-| D4 | 16 | Navigation, orientation and search behaviour (turning, looping) |
-| D5 | 20 | Sensorimotor control and manoeuvrability (power law, Lévy tail) |
-| D6 | 14 | Behavioural state organisation (hover, stopping, takeoff) |
-
----
-
-## Environment setup
-
-### 1. Create the main `trait-env` environment
-
-Python 3.10 or later is required. If `pip` reports that SciPy is only
-available up to `1.13.1`, the active environment is using Python 3.9 or older;
-recreate the environment with Python 3.10+.
-
-```bash
-python3.10 -m venv trait-env
-source trait-env/bin/activate          # macOS / Linux
-# trait-env\Scripts\activate           # Windows
-python -m pip install -r requirements.txt
-```
-
-This installs all dependencies for Phases 1–5 (feature extraction, CV splits, LR / RF / XGBoost / 1D-CNN / miniROCKET / Transformer / ConvTran training, cross-farm generalisation, and ablation studies) into a single environment.
-
-### 2. Activate before running the pipeline
-
-```bash
-source trait-env/bin/activate
-bash run_pipeline_review.sh --fps 30
-```
-
-If PyTorch, aeon, or xgboost fail to import (e.g. on an unsupported platform),
-the pipeline automatically **skips** the steps that depend on them (1D-CNN,
-miniROCKET, Transformer, ConvTran; xgboost's absence also skips Phase 4 and
-Phase 5) and continues — silently, by design, so a step is marked complete
-even though no result was produced. Before a long or unattended run (e.g. a
-cluster job), run the dependency preflight check first:
-
-```bash
-bash preflight_check.sh
-```
-
-It verifies numpy/scipy/pandas/scikit-learn/xgboost/matplotlib/torch/aeon/numba
-are all importable and reports exactly which results you'd silently lose if
-any are missing.
-
----
-
-## Reproducing results
-
-`run_pipeline_review.sh` is the current, maintained pipeline — it mirrors
-`run_pipeline.sh` exactly (same five phases, same CLI, same checkpointing)
-but adds a preprocessing-parity fix for the sequence baselines and two new
-Phase 3 models (Transformer, ConvTran); see [Camera-ready revision
-additions](#camera-ready-revision-additions) below. Use it unless you
-specifically need the earlier `run_pipeline.sh` behaviour.
-
-Run the full pipeline end-to-end:
-
-```bash
-bash run_pipeline_review.sh --fps 30
-```
-
-Run the final-report reproducibility mode:
-
-```bash
-bash run_pipeline_review.sh --fps 30 --test-run --run-name final_report
-```
-
-`--test-run` forces single-threaded RF/XGBoost/miniROCKET, deterministic
-PyTorch settings, and CPU FCN/Transformer/ConvTran execution. It is slower,
-but is intended for the canonical result table — it's also what keeps
-latency figures for the deep-learning baselines comparable to XGBoost's
-CPU-only numbers.
-
-Resume from a specific phase (e.g. after Phase 2 splits already exist):
-
-```bash
-bash run_pipeline_review.sh --fps 30 --from-phase 3
-```
-
-Save results to a named folder:
-
-```bash
-bash run_pipeline_review.sh --fps 30 --run-name my_run
-```
-
-All checkpoints are written to `data/results/<run>/ckpts/`. Re-running the script automatically skips completed steps.
-
-### Pipeline phases
-
-**Phase 1 — Feature generation**
-
-Applies Savitzky-Golay smoothing (window=11, poly=2) to raw (x, y) coordinates and extracts 125 motion features across six biological domains. Tracks shorter than 5 frames are discarded.
-
-**Phase 2 — CV splits**
-
-Creates station-disjoint 5-fold grouped splits (group = farm + location + station). `StratifiedGroupKFold` is the default, using farm-location × class strata and a deterministic seed search to choose a balanced grouped split; legacy `GroupKFold` can be selected with `--fold-strategy group`. Fold 4 is held out as the fixed test set and is never used for model selection or threshold tuning.
-
-**Phase 3 — Model performance**
-
-Trains and evaluates all classifiers on the held-out test set:
-
-- Majority baseline (prevalence reference)
-- Logistic Regression (L2-regularised)
-- Random Forest (100 trees)
-- XGBoost (depth=5, scale_pos_weight tuned for class imbalance)
-- 1D-CNN (temporal FCN with PR-AUC early stopping)
-- miniROCKET (fixed convolutional kernels + ridge classifier)
-- Transformer (linear projection + learnable positional embedding + standard
-  `nn.TransformerEncoder`, linear LR warmup + cosine decay)
-- ConvTran (Foumani et al., DMKD 2024 — disjoint-CNN convolutional tokeniser,
-  tAPE positional encoding, eRPE relative-position attention)
-
-1D-CNN, miniROCKET, Transformer, and ConvTran all consume an identical
-gap-filled, Savitzky-Golay-smoothed trajectory (`src/utils/smoothing.py`),
-matching the preprocessing used to build the 125-feature set, so the
-comparison isolates model architecture rather than input preprocessing.
-
-Model selection and hyperparameter tuning use validation PR-AUC only; decision thresholds are tuned by validation F1. Output: `phase3_model_comparison.csv` and `figures/phase3_precision_recall_curves.png`.
-
-**Phase 4 — Cross-farm generalisation**
-
-Trains XGBoost on all tracks from one farm and evaluates on the other (A→B and B→A), with no domain adaptation or shared normalisation.
-
-**Phase 5 — Ablation studies**
-
-Three complementary ablation experiments, all using XGBoost on the held-out test set:
-
-- *Cumulative domain ablation*: D1 → D1+D2 → D1+D2+D3 → … → D1–D6
-- *Single-domain-only ablation*: each domain Di evaluated independently
-- *Leave-one-group-out ablation*: each of 32 biological feature subgroups left out in turn
-
----
-
-## Camera-ready revision additions
-
-Two supplementary studies accompany the main results. Neither runs by
-default, and neither modifies the reported numbers.
-
-**`src/cross_farm_threshold_study.py`** — cross-farm decision-threshold
-sensitivity. Phase 4's cross-farm PR-AUC is threshold-independent, so it
-can't say whether the single fixed decision threshold (tuned on the pooled
-training distribution) still lands at a sensible precision/recall point on
-an unseen farm. This script retrains XGBoost with the same specification as
-Phase 4, for each of the four evaluations (within-A, within-B, A→B, B→A),
-and reports precision/recall/F1 at the deployed threshold alongside that
-evaluation's own locally-optimal threshold.
-
-```bash
-python src/cross_farm_threshold_study.py \
-    --features-csv data/results/<run>/track_features.csv \
-    --output-dir   data/results/<run>
-```
-
-Output: `data/results/<run>/cross_farm_threshold_study/cross_farm_threshold_summary.csv`
-(+ per-track predictions).
-
-**ConvTran batch-size sensitivity** — `src/train_convtran.py` uses ConvTran's
-own published architecture defaults but trains at `batch_size=128` rather
-than the official recipe's 16, for parity with this project's other sequence
-baselines. The sweep trains ConvTran at several batch sizes to check the
-reported result is stable across that choice rather than an artefact of one
-setting.
-
-It is built into the pipeline as an **opt-in** step (3.4d) — omitted by
-default, so a normal run is unaffected:
-
-```bash
-bash run_pipeline_review.sh --fps 30 --from-phase 3 \
-    --convtran-batch-sweep "16 32 64 96 128 192"
-```
-
-The same sweep can also be run standalone, without the pipeline:
-
-```bash
-python src/convtran_batch_size_study.py \
-    --batch-sizes 16 32 64 96 128 192 \
-    --output-dir data/results/<run>
-```
-
-Output (either route): `data/results/<run>/convtran_batch_size_study/convtran_batch_size_summary.csv`.
-The reported ConvTran result in `convtran_prauc/` is never touched — each
-batch size writes to its own `bs_<N>/` subdirectory.
-
-Each batch size is a full training run — smaller batch sizes take
-substantially longer (more optimiser steps per epoch), so budget accordingly
-at production settings (`max_len=512`, the full training set). The sweep
-resumes automatically (skips batch sizes with existing results; pass
-`--overwrite` to force a re-run) and logs each run to its own `train.log`
-rather than aborting if one batch size fails.
-
-A no-LR-warmup ablation of the Transformer encoder was also run during
-development (`train_transformer.py --warmup-ratio 0`) to rule out
-under-optimisation as an explanation for its result — PR-AUC 0.8068 vs.
-0.8002 with warmup, well within each other's confidence interval. It is not
-part of the automated pipeline or the reported results, but the
-`--warmup-ratio` flag remains available on `train_transformer.py` for anyone
-who wants to reproduce that check.
-
----
-
-## Key outputs
-
-| File | Description |
-|------|-------------|
-| `data/splits_folds.csv` | Station-disjoint fold assignments (generated by Phase 2) |
-| `data/results/<run>/track_features.csv` | 125-feature matrix for all tracks |
-| `data/results/<run>/phase3_model_comparison.csv` | Model comparison table (all 8 models) |
-| `data/results/<run>/figures/phase3_precision_recall_curves.png` | PR curves figure |
-| `data/results/<run>/transformer_warmup_prauc/transformer_results.csv` | Transformer result |
-| `data/results/<run>/convtran_prauc/convtran_results.csv` | ConvTran result |
-| `data/results/<run>/cross_farm/cross_farm_results.csv` | Cross-farm results (Phase 4) |
-| `data/results/<run>/ablation/domain_ablation_results.csv` | Cumulative domain ablation |
-| `data/results/<run>/ablation/domain_only_results.csv` | Single-domain-only ablation |
-| `data/results/<run>/ablation/group_loo_ablation.csv` | Group leave-one-out ablation |
-| `data/results/<run>/figures/group_loo_top_positive_negative.png` | Group LOO figure |
-| `data/results/<run>/cross_farm_threshold_study/cross_farm_threshold_summary.csv` | Supplementary: threshold sensitivity (manual run) |
-| `data/results/<run>/convtran_batch_size_study/convtran_batch_size_summary.csv` | Supplementary: batch-size sensitivity (manual run) |
+To delete all generated outputs and start from scratch, run `bash clean.sh --confirm`.
+The downloaded dataset is kept.
 
 ---
 
 ## Citation
 
-If you use TRAIT in your work, please cite:
+If you use the code or dataset, please cite:
 
 ```bibtex
-@inproceedings{[key],
-  title     = {[Title]},
-  author    = {[Authors]},
-  booktitle = {[Venue]},
-  year      = {[Year]},
-  doi       = {[DOI]}
+@inproceedings{ratnayake2027trait,
+  title     = {Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps},
+  author    = {Ratnayake, Malika Nisal and Dorin, Alan},
+  booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+  year      = {2027}
 }
 ```
 
 ---
 
+## Acknowledgements
+
+This work was supported by the Australian Research Council Linkage Projects funding
+scheme (project LP210200213), the Australian Blueberry Growers' Association and
+Costa Group.
+
+---
+
 ## License
 
-[To be added upon acceptance]
+- Code: **[to be added]**
+- Dataset: CC BY 4.0

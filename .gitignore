@@ -86,3 +86,6 @@ Thumbs.db
 
 #Deployment files
 deployment/
+
+# Manuscript sources (not distributed with the code)
+manuscript/

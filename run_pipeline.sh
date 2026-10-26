@@ -939,6 +939,30 @@ if needs_run_with_deps "$STEP" 5 \
     mark_done "$STEP"
 fi
 
+# 5.3 Trajectory figures (class overlays + best-session spaghetti)
+STEP="p5_trajectory_figs"
+if needs_run_with_deps "$STEP" 5 \
+    "$SPLITS_CSV" \
+    "$REPO/src/figures/plot_class_trajectory_overlays.py" \
+    "$REPO/src/figures/plot_session_trajectories.py" \
+    "$REPO/src/figures/_track_utils.py" \
+    "$REPO/run_pipeline.sh"; then
+    log "5.3  Plotting trajectory figures …"
+    mkdir -p "$FIGURES_DIR"
+    run_cmd "$PYTHON" src/figures/plot_class_trajectory_overlays.py \
+        --splits-csv "$SPLITS_CSV" \
+        --tracks-dir "$TRACKS_DIR" \
+        --output-dir "$FIGURES_DIR" \
+        || warn "Class-overlay figure failed — continuing"
+    run_cmd "$PYTHON" src/figures/plot_session_trajectories.py \
+        --splits-csv "$SPLITS_CSV" \
+        --tracks-dir "$TRACKS_DIR" \
+        --output-dir "$FIGURES_DIR" \
+        --rank 1 \
+        || warn "Session trajectory figure failed — continuing"
+    mark_done "$STEP"
+fi
+
 ok "Phase 5 complete"
 
 if [[ "$DEFER_SEQUENCE_BASELINES" -eq 1 ]]; then
@@ -971,4 +995,5 @@ log "           cumulative  → $RESULTS/ablation/domain_ablation_results.csv"
 log "           single-dom  → $RESULTS/ablation/domain_only_results.csv"
 log "           group LOO   → $RESULTS/ablation/group_loo_ablation.csv"
 log "           LOO figure  → $FIGURES_DIR/group_loo_top_positive_negative.png"
+log "           trajectories→ $FIGURES_DIR/class_trajectory_overlays.png, session_trajectories_rank1.png"
 echo ""
