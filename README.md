@@ -160,7 +160,7 @@ completed steps, so an interrupted run can simply be restarted.
 
 | Option | Effect |
 |---|---|
-| `--fps 30` | Frame rate used for feature extraction. Required on the first run, then cached in `data/pipeline.cfg`. |
+| `--fps 30` | Frame rate used for feature extraction. Required on the first run of each run folder, then cached in its `pipeline.cfg`. |
 | `--run-name NAME` | Write results to `data/results/NAME/`. |
 | `--test-run` | Deterministic, single-threaded, CPU-only mode used for the paper. |
 | `--from-phase N` | Re-run from phase N (1–5) onwards. |

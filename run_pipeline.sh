@@ -30,7 +30,7 @@
 #
 # Options:
 #   --fps FLOAT          Frames per second for feature extraction [required on
-#                        first run; cached in data/pipeline.cfg afterwards]
+#                        first run; cached in RESULTS/pipeline.cfg afterwards]
 #   --from-phase N       Restart from phase N (1–5)
 #   --results-dir PATH   Use an explicit results directory
 #   --run-name NAME      Save results under data/results/<NAME>/
@@ -85,7 +85,6 @@ FEATURE_BATCH_SIZE="${FEATURE_BATCH_SIZE:-1000}"
 RESULTS_ROOT="$REPO/data/results"
 RESULTS="$RESULTS_ROOT/trait_results"
 LOGS_DIR="$REPO/logs"
-CFG_FILE="$REPO/data/pipeline.cfg"
 PYTHON="${PYTHON:-python3}"
 FEATURES_CSV_OVERRIDE=""
 
@@ -164,6 +163,7 @@ CKPTS="$RESULTS/ckpts"
 FEATURES_CSV="${FEATURES_CSV_OVERRIDE:-$RESULTS/track_features.csv}"
 FEATURES_CSV="$(abs_path "$FEATURES_CSV")"
 FEATURE_CKPT_DIR="$RESULTS/feature_ckpts"
+CFG_FILE="$RESULTS/pipeline.cfg"   # cached --fps for this run
 FIGURES_DIR="$RESULTS/figures"
 
 # ── Load cached FPS if not provided ──────────────────────────────────────────
@@ -371,7 +371,9 @@ if needs_run "$STEP" 1; then
         exit 1
     fi
     [[ ! -d "$TRACKS_DIR" ]] && { err "Tracks dir not found: $TRACKS_DIR"; exit 1; }
-    echo "fps=$FPS" > "$CFG_FILE"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        echo "fps=$FPS" > "$CFG_FILE"
+    fi
     if [[ "$DRY_RUN" -eq 1 ]]; then
         run_cmd "$PYTHON" src/generate_features.py \
             --tracks-dir "$TRACKS_DIR" \
