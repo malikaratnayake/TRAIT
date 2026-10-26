@@ -1,18 +1,19 @@
 """
 src/generate_features.py
 ========================
-Phase 1 — Extract 125 motion-derived features from insect tracks.
+Phase 1 — Gap filling, smoothing and extraction of the 125 motion features.
 
-No feature is derived from recorded metadata. Time-of-day, station ID and
-season/farm are deliberately excluded so the classifier relies only on
-intrinsic motion, never on recording context.
+For every track listed in the labels CSV, the raw centroid coordinates are
+gap-filled by linear interpolation and smoothed with a Savitzky–Golay filter
+(11-frame window, polynomial order 2; src/utils/smoothing.py), and the 125
+behaviour-informed features are computed from the smoothed trajectory (paper
+Sec. 3.2–3.3; definitions and equations in Section 1 of the supplementary
+material). Only the wingbeat-residual features also use the raw coordinates.
+No recording metadata (time of day, station, farm) is used as a feature.
 
-Biological hierarchy and output order
--------------------------------------
-The authoritative six-domain, 125-feature hierarchy is declared in
-src.models.data_loader. This script calculates reusable formula blocks and
-then assembles the final feature dictionary in the canonical domain/subgroup
-order:
+The features are organised into six domains and 32 subgroups, declared in
+src/models/data_loader.py; this script computes them with reusable formula
+blocks and writes them in that canonical order:
 
   D1 Fundamental locomotion kinematics (26)
      d1_duration, d1_speed, d1_dynamic, d1_distributional, d1_intensity
@@ -21,20 +22,22 @@ order:
      d2_diffusion, d2_sinuosity
   D3 Flight rhythm, oscillation and biomechanics (30)
      d3_h_oscillation, d3_v_oscillation, d3_cross_axis, d3_spectral,
-     d3_residual, d3_hover_stab
+     d3_residual, d3_hover_stab (mean reversion)
   D4 Navigation, orientation and search behaviour (16)
      d4_directional, d4_heading_occ, d4_zigzag, d4_looping, d4_bias
-  D5 Sensorimotor control and maneuverability (20)
+  D5 Sensorimotor control and manoeuvrability (20)
      d5_turning, d5_saccade, d5_fixation, d5_maneuver, d5_power_law,
      d5_levy, d5_aero
   D6 Behavioural state organisation (14)
      d6_hover, d6_stopping, d6_landing, d6_takeoff
 
-Wingbeat residuals use raw (x, y) vs. smoothed (sx, sy) coordinates.
+Tracks with fewer than 5 points get only the track-support features; all
+other features are NaN and are median-imputed from training rows later. (The
+released dataset already excludes tracks shorter than five frames; its
+shortest track has 10 points.)
 
-All features operate on smoothed coordinates (sx, sy by default).
-Short tracks (n < 5) return NaN for all derived features; XGBoost / LightGBM
-handle NaN natively.
+Large datasets can be processed in batches (--batch-size, checkpoints in
+--ckpt-dir) and merged with --finalize; run_pipeline.sh does this.
 
 Usage
 -----
@@ -42,7 +45,7 @@ Usage
       --tracks-dir  data/tracks \\
       --labels-csv  data/track_classification.csv \\
       --fps         30 \\
-      --output-csv  data/track_features.csv
+      --output-csv  data/results/trait_results/track_features.csv
 """
 
 from __future__ import annotations
@@ -100,6 +103,7 @@ def _canonical_feature_order(feats: dict) -> dict:
 # ---------------------------------------------------------------------------
 # d1_duration: track support
 def feat_basic(frames: np.ndarray, fps: float) -> dict:
+    """Track support: number of points, frame span and duration in seconds."""
     n = len(frames)
     dur_frames = int(frames[-1] - frames[0] + 1) if n else n
     return {
@@ -111,6 +115,7 @@ def feat_basic(frames: np.ndarray, fps: float) -> dict:
 
 # d1_speed: core speed statistics
 def feat_speed(speed: np.ndarray) -> dict:
+    """Speed statistics: mean, SD, max, 90th percentile and coefficient of variation."""
     return {
         "mean_speed": float(np.mean(speed)),
         "std_speed": float(np.std(speed)),
@@ -122,19 +127,20 @@ def feat_speed(speed: np.ndarray) -> dict:
 
 # d1_dynamic: acceleration, jerk, effort, and acceleration envelope
 def feat_accel(speed: np.ndarray, fps: float) -> dict:
+    """Mean, SD and max of the absolute change in speed (px/s²)."""
     if len(speed) < 2:
         return {"mean_accel": np.nan, "std_accel": np.nan, "max_accel": np.nan}
     accel = np.diff(speed) * fps
     accel_abs = np.abs(accel)
     return {
         "mean_accel": float(np.mean(accel_abs)),
-        "std_accel":  float(np.std(accel_abs)),   # Fix: std of |accel|, consistent with mean/max
+        "std_accel":  float(np.std(accel_abs)),   # std of |accel|, consistent with mean/max
         "max_accel":  float(np.max(accel_abs)),
     }
 
 
 def feat_mean_abs_jerk(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
-    """B1 — Mean absolute jerk (rate of change of acceleration).
+    """Mean absolute jerk (rate of change of acceleration).
 
     Insects show frequent jerk spikes when changing direction abruptly.
     Wind plants produce smooth, sinusoidal motion → low jerk.
@@ -153,7 +159,7 @@ def feat_mean_abs_jerk(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
 
 def feat_kinematic_effort(speed: np.ndarray, x: np.ndarray,
                            y: np.ndarray, fps: float) -> dict:
-    """I7 — Kinematic energy and effort proxies.
+    """Kinematic energy and effort proxies.
 
     Powered insect flight requires sustained mechanical effort against drag,
     distinguishing it from passive drift (debris) or wind-forced motion.
@@ -169,7 +175,7 @@ def feat_kinematic_effort(speed: np.ndarray, x: np.ndarray,
     if len(speed) < 4:
         return nan_result
 
-    ske   = float(0.5 * np.mean(speed**2))  # G-1 fix: correct ½ factor
+    ske   = float(0.5 * np.mean(speed**2))  # ½·mean(v²)
     accel = np.abs(np.diff(speed)) * fps
     power = float(np.mean(speed[:-1] * accel)) if len(accel) > 0 else np.nan
 
@@ -219,7 +225,7 @@ def feat_aerodynamic_envelope(x: np.ndarray, y: np.ndarray,
     else:
         env_slope = np.nan
 
-    # Re proxy: mean_speed × sqrt(hull_area) — G-3 fix
+    # Re proxy: mean_speed × sqrt(hull_area)
     try:
         hull_area = float(ConvexHull(np.column_stack([x, y])).volume)
     except Exception:
@@ -236,7 +242,7 @@ def feat_aerodynamic_envelope(x: np.ndarray, y: np.ndarray,
 # feat_robustness is a shared helper; it is placed here because its first
 # canonical outputs are D1 distribution/intensity features.
 def feat_speed_shape(speed: np.ndarray) -> dict:
-    """B3 — Higher-order speed statistics.
+    """Higher-order speed statistics.
 
     Insects show right-skewed speed (mostly slow, with burst spikes).
     Wind plants show symmetric or weakly-skewed speed.
@@ -251,7 +257,7 @@ def feat_speed_shape(speed: np.ndarray) -> dict:
 
 
 def feat_levy_steps(x: np.ndarray, y: np.ndarray) -> dict:
-    """I4 — Lévy flight step-length statistics.
+    """Lévy flight step-length statistics.
 
     Insect foraging follows Lévy-like step distributions (power law).
     Non-insects (debris, noise) follow exponential or Gaussian step lengths.
@@ -387,7 +393,7 @@ def feat_robustness(
     else:
         out["spectral_flatness"] = np.nan
 
-    # low_band_psd_ratio  — power below 1 Hz (T-1 bug fix: was 3 Hz)
+    # low_band_psd_ratio  — fraction of power at or below 1 Hz
     if psd is not None and psd_sum > 1e-30:
         out["low_band_psd_ratio"] = float(psd[f_arr <= 1.0].sum() / psd_sum)
     else:
@@ -510,7 +516,8 @@ def feat_robustness(
 
 # d1_intensity: burst, near-stop, jerk, and spike-rate measures
 def feat_stops_bursts(speed: np.ndarray, fps: float) -> dict:
-    # Fix 2: thresholds were in px/frame; speed is in px/s → multiply by fps
+    """Stop and burst fractions from speed thresholds of 1 and max(3, Q75) px/frame."""
+    # speed is in px/s, so the px/frame thresholds are multiplied by fps
     stop_thr  = 1.0 * fps
     burst_thr = max(3.0 * fps, float(np.percentile(speed, 75)))
     return {
@@ -524,6 +531,7 @@ def feat_stops_bursts(speed: np.ndarray, fps: float) -> dict:
 # ---------------------------------------------------------------------------
 # d2_path_geometry: path length, displacement, straightness, and scales
 def feat_trajectory(x: np.ndarray, y: np.ndarray) -> dict:
+    """Path length, net displacement and straightness (net displacement / path length)."""
     dx, dy = np.diff(x), np.diff(y)
     step = np.sqrt(dx**2 + dy**2)
     path_len = float(np.sum(step))
@@ -537,7 +545,7 @@ def feat_trajectory(x: np.ndarray, y: np.ndarray) -> dict:
 
 
 def feat_multiscale_straightness(x: np.ndarray, y: np.ndarray) -> dict:
-    """I1 — Straightness computed at three temporal scales.
+    """Straightness computed at three temporal scales.
 
     Insects are tortuous at short scales (looping near a flower) but
     directed at coarse scales (travelling between patches).  Plant motion
@@ -552,6 +560,7 @@ def feat_multiscale_straightness(x: np.ndarray, y: np.ndarray) -> dict:
         return nan_result
 
     def _window_straightness(x, y, w):
+        """Mean straightness over half-overlapping windows of w points."""
         vals = []
         for i in range(0, n - w, max(1, w // 2)):
             xs, ys = x[i:i+w], y[i:i+w]
@@ -574,6 +583,7 @@ def feat_multiscale_straightness(x: np.ndarray, y: np.ndarray) -> dict:
 
 # d2_spatial_spread: bounding box, convex hull, and centroid spread
 def feat_spatial(x: np.ndarray, y: np.ndarray) -> dict:
+    """Bounding-box area and aspect ratio, radius of gyration and mean distance to the centroid."""
     xmin, xmax = np.min(x), np.max(x)
     ymin, ymax = np.min(y), np.max(y)
     w, h = xmax - xmin, ymax - ymin
@@ -590,7 +600,7 @@ def feat_spatial(x: np.ndarray, y: np.ndarray) -> dict:
 
 
 def feat_convex_hull(x: np.ndarray, y: np.ndarray) -> dict:
-    """C1 — Convex hull area.
+    """Convex hull area.
 
     Insects explore 2D space freely → larger hull.
     Wind plants are tethered → small, flattened hull.
@@ -611,7 +621,7 @@ def feat_convex_hull(x: np.ndarray, y: np.ndarray) -> dict:
 
 # d2_exploration: range use, confinement, entropy, and revisitation
 def feat_track_confinement(x: np.ndarray, y: np.ndarray) -> dict:
-    """E2 — Track confinement and start-anchoring features.
+    """Track confinement and start-anchoring features.
 
     track_confinement_ratio = total_path_length / max_displacement_from_start
       Plants: high ratio (long path but spatially confined near anchor)
@@ -627,7 +637,7 @@ def feat_track_confinement(x: np.ndarray, y: np.ndarray) -> dict:
     path_len = float(np.sum(np.sqrt(dx**2 + dy**2)))
     dist_from_start = np.sqrt((x - x[0])**2 + (y - y[0])**2)
     max_disp = float(np.max(dist_from_start))
-    # Fix 5: revert to path_length/max_displacement (net_disp/sqrt(hull) gave ~0 for circles)
+    # path length / maximum displacement from the start
     confinement = path_len / (max_disp + 1e-6)
     return_rate = float(np.mean(dist_from_start < 10.0))
     return {
@@ -638,7 +648,7 @@ def feat_track_confinement(x: np.ndarray, y: np.ndarray) -> dict:
 
 
 def feat_spatial_entropy(x: np.ndarray, y: np.ndarray) -> dict:
-    """I6 — Spatial coverage entropy and revisitation rate.
+    """Spatial coverage entropy and revisitation rate.
 
     A uniform forager visits all regions of its range; a transiting insect
     has elongated, sparse coverage; debris drifts with uneven coverage.
@@ -677,7 +687,7 @@ def feat_spatial_entropy(x: np.ndarray, y: np.ndarray) -> dict:
 
 # d2_diffusion and d2_sinuosity: MSD exponent and path sinuosity
 def feat_msd_alpha(x: np.ndarray, y: np.ndarray) -> dict:
-    """G1 — Mean Squared Displacement power-law exponent α.
+    """Mean Squared Displacement power-law exponent α.
 
     MSD(τ) ∝ τ^α
       α < 1 : sub-diffusive (confined, tethered plant)
@@ -709,6 +719,12 @@ def feat_msd_alpha(x: np.ndarray, y: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 # d3_h_oscillation and d3_v_oscillation: axis-wise spectral/autocorr rhythm
 def feat_spectral(signal: np.ndarray, fps: float, axis_label: str) -> dict:
+    """FFT summary of one coordinate signal, keyed by axis_label ('x' or 'y').
+
+    Dominant frequency, its share of power, normalised spectral entropy,
+    share of power at or below 1 Hz, and peak sharpness, over 0.1 Hz to the
+    Nyquist frequency.
+    """
     prefix = axis_label
     n = len(signal)
     if n < 8:
@@ -750,6 +766,7 @@ def feat_spectral(signal: np.ndarray, fps: float, axis_label: str) -> dict:
 
 
 def feat_autocorr(signal: np.ndarray, axis_label: str) -> dict:
+    """Lag (frames) and value of the autocorrelation peak of one coordinate signal, up to lag 200."""
     prefix = axis_label
     n = len(signal)
     if n < 10:
@@ -765,13 +782,14 @@ def feat_autocorr(signal: np.ndarray, axis_label: str) -> dict:
 
 
 def feat_oscillation_regularity(x: np.ndarray, y: np.ndarray) -> dict:
-    """E3 — How metronomic are the reversals?
+    """How metronomic are the reversals?
 
     Wind plants oscillate at a stable period (low CV of inter-reversal
     intervals → regularity close to 1.0).
     Insects reverse erratically (high CV → regularity close to 0).
     """
     def _regularity(sig: np.ndarray) -> float:
+        """1 − CV of the intervals between direction reversals, clipped to [0, 1]."""
         if len(sig) < 10:
             return np.nan
         reversals = np.where(np.diff(np.sign(np.diff(sig))) != 0)[0]
@@ -792,7 +810,7 @@ def feat_oscillation_regularity(x: np.ndarray, y: np.ndarray) -> dict:
 
 # d3_cross_axis: horizontal/vertical frequency coherence
 def feat_xy_freq_coherence(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
-    """D1 — Cross-axis frequency coherence.
+    """Cross-axis frequency coherence.
 
     Wind oscillates x and y at the same frequency (forced by wind direction).
     Insects move x and y semi-independently.
@@ -803,6 +821,7 @@ def feat_xy_freq_coherence(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
         return {"xy_freq_coherence": np.nan}
 
     def _dom_freq(sig: np.ndarray) -> float:
+        """Dominant FFT frequency (Hz) of a signal, above 0.1 Hz."""
         s = sig - np.mean(sig)
         X = np.fft.rfft(s * np.hanning(n))
         power = np.abs(X)**2
@@ -826,7 +845,7 @@ def feat_xy_freq_coherence(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
 def feat_wingbeat_residuals(x_raw: np.ndarray, y_raw: np.ndarray,
                              x_sm: np.ndarray, y_sm: np.ndarray,
                              fps: float) -> dict:
-    """I5 — Wing-beat micro-oscillation from smoothing residuals.
+    """Wing-beat micro-oscillation from smoothing residuals.
 
     The difference between raw and smoothed coordinates captures
     sub-frame micro-motion.  For insects this contains real biological
@@ -837,7 +856,7 @@ def feat_wingbeat_residuals(x_raw: np.ndarray, y_raw: np.ndarray,
       • residual_std       : variation in residual magnitude
       • residual_max       : maximum residual magnitude
     """
-    # G-7 fix: return mean/std/max of |ε(t)| as documented in the ablation study
+    # mean / std / max of the residual magnitude |ε(t)|
     nan_result = {"residual_mean": np.nan, "residual_std": np.nan,
                   "residual_max": np.nan}
     n = len(x_raw)
@@ -886,7 +905,7 @@ def feat_wingbeat_aliasing(x_raw: np.ndarray, y_raw: np.ndarray,
     psd[0] = 0
     total_power = np.sum(psd)
     if total_power > 0:
-        band = (frq >= 5.0) & (frq <= min(15.0, fps / 2.0))  # Fix: cap at Nyquist (avoids fps-dependent bias at 25 fps)
+        band = (frq >= 5.0) & (frq <= min(15.0, fps / 2.0))  # 5–15 Hz, capped at the Nyquist frequency
         ali_power = float(np.sum(psd[band]) / total_power) if np.any(band) else np.nan
     else:
         ali_power = np.nan
@@ -915,7 +934,7 @@ def feat_wingbeat_aliasing(x_raw: np.ndarray, y_raw: np.ndarray,
 
 # d3_hover_stab: mean-reversion and hover stabilisation
 def feat_mean_reversion(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
-    """E1 — Mean reversion strength.
+    """Mean reversion strength.
 
     Physics: a tethered plant has a restoring force toward its anchor.
     This creates a strong negative correlation between (position − mean)
@@ -947,6 +966,7 @@ def feat_mean_reversion(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
 # ---------------------------------------------------------------------------
 # d4_directional: heading entropy, turn tendency, persistence, and drift
 def feat_turning(dx: np.ndarray, dy: np.ndarray) -> dict:
+    """Mean absolute and SD of turn angles, and normalised 16-bin heading entropy."""
     if len(dx) < 2:
         return {"turn_mean_abs": np.nan, "turn_std": np.nan, "heading_entropy": np.nan}
     headings = np.arctan2(dy, dx)
@@ -960,12 +980,11 @@ def feat_turning(dx: np.ndarray, dy: np.ndarray) -> dict:
         "turn_mean_abs": float(np.mean(np.abs(dtheta))),
         "turn_std": float(np.std(dtheta)),
         "heading_entropy": H_norm,
-        # NOTE: reversal_rate dropped — superseded by oscillation_regularity
     }
 
 
 def feat_turn_advanced(dx: np.ndarray, dy: np.ndarray) -> dict:
-    """I2 — Advanced turning statistics.
+    """Advanced turning statistics.
 
     Beyond mean/std/entropy of turn angles:
       • turn_kurtosis      : heavy-tailed ↔ sharp reversals mixed with glides
@@ -994,12 +1013,6 @@ def feat_turn_advanced(dx: np.ndarray, dy: np.ndarray) -> dict:
 
     return {"turn_kurtosis": kurt, "uturn_rate": uturn,
             "forward_rate": fwd, "crw_persistence": crw}
-
-
-# NOTE: feat_drift_consistency was removed (2026-06-02). It computed the mean
-# cosine of successive displacement vectors, which is identically the mean cosine
-# of turn angles already provided by crw_persistence (feat_turn_advanced). The
-# two features were numerically identical, so drift_consistency was dropped.
 
 
 # d4_heading_occ: heading levels and dwell entropy
@@ -1036,7 +1049,7 @@ def feat_saccade_fixation(dx: np.ndarray, dy: np.ndarray, fps: float) -> dict:
     if len(dtheta) < 3:
         return nan_r
 
-    THETA_SACC = np.radians(45)   # G-10 fix: 45° threshold (was 30°)
+    THETA_SACC = np.radians(45)   # 45° saccade threshold
     THETA_FIX  = np.radians(10)
 
     # ── Saccade detection ────────────────────────────────────────────────────
@@ -1145,7 +1158,7 @@ def feat_cast_surge(dx: np.ndarray, dy: np.ndarray) -> dict:
         alt_idx = np.nan
 
     # ── Heading zigzag index: negative lag-1 autocorrelation of turn angles ──
-    # Fix 8: cos/sin cross-corr returns NaN when cos(θ) is constant (symmetric zigzag).
+    # (A cos/sin cross-correlation would be NaN when cos(θ) is constant, e.g. a symmetric zigzag.)
     # Lag-1 autocorrelation of signed dθ: negative = turn sign alternates (zigzag).
     # We flip the sign so high value = strong zigzag.
     if len(dtheta) >= 4:
@@ -1175,7 +1188,7 @@ def feat_heading_decoupling(x: np.ndarray, y: np.ndarray,
         1 − mean(cos(θ_instant − θ_coarse)), where θ_coarse is the heading of a
         5-frame moving average of the velocity vector. 0 = instantaneous heading
         tracks the smoothed heading (passive drift); higher = active decoupling.
-        Rotation-invariant by construction (see Fix 8).
+        Rotation-invariant by construction.
 
     reverse_translation_fraction:
         Fraction of frames where the instantaneous velocity direction
@@ -1192,8 +1205,8 @@ def feat_heading_decoupling(x: np.ndarray, y: np.ndarray,
     dtheta   = _wrap(np.diff(headings))     # turn angles
 
     # ── Heading-translation decoupling: circular mean of alignment angle ──────
-    # Fix 8: Pearson(cos(h1),cos(h2)) is camera-axis-dependent (NaN when heading
-    # is near 90°). Use mean(cos(h_instant − h_coarse)) instead — rotation-invariant.
+    # mean(cos(h_instant − h_coarse)) is rotation-invariant, unlike a Pearson
+    # correlation of cos(h), which depends on the camera axes (NaN near 90°).
     if n >= 12 and len(dx) >= 6:
         cos_h = np.cos(headings)
         sin_h = np.sin(headings)
@@ -1229,7 +1242,7 @@ def feat_heading_decoupling(x: np.ndarray, y: np.ndarray,
 # d4_looping: rotation, circling, winding, and figure-eight structure
 def feat_looping(x: np.ndarray, y: np.ndarray,
                  dx: np.ndarray, dy: np.ndarray) -> dict:
-    """I3 — Looping and circular flight behaviour.
+    """Looping and circular flight behaviour.
 
     Insects often fly in loops, figure-eights, or helices near hosts/flowers.
 
@@ -1251,7 +1264,7 @@ def feat_looping(x: np.ndarray, y: np.ndarray,
     headings = np.arctan2(dy, dx)
     dtheta   = _wrap(np.diff(headings))
 
-    # Fix 5: restore signed winding (abs() broke figure-eights; self_intersections takes abs separately)
+    # Signed winding; self_intersections takes the absolute value separately
     net_rot  = float(np.sum(dtheta) / (2 * np.pi))   # signed: +CW, −CCW dominant
 
     # Circling index: cross-product sign consistency
@@ -1287,9 +1300,6 @@ def feat_maneuvers(dx: np.ndarray, dy: np.ndarray,
         that occur after at least a half-rotation in each direction.
         Detects figure-8 / lemniscate flight paths.
     """
-    # NOTE: n_hairpin_reversals removed (2026-06-02) — it was the raw count of
-    # |Δθ| > 150°, identical (up to track-length normalisation) to uturn_rate,
-    # which already reports the same event as a fraction. uturn_rate is retained.
     nan_r = {"max_persistent_curving_run": np.nan,
              "figure_eight_count": np.nan}
     if len(dx) < 4:
@@ -1357,14 +1367,13 @@ def feat_vertical(dy: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 # d5_turning, d5_maneuver, d5_power_law, d5_levy, and d5_aero helpers
 def feat_speed_at_turns(x: np.ndarray, y: np.ndarray, fps: float) -> dict:
-    """E4 — Mean speed at genuine direction-change frames.
+    """Mean speed at genuine direction-change frames.
 
     A pendulum slows to nearly zero at its turning points.
     Insects maintain speed (or accelerate) through direction changes.
 
-    Fix 9: original used any speed minimum regardless of heading change,
-    triggering on straight trajectories with variable speed.  Now requires
-    heading change > 15° at the local speed minimum.
+    Only speed minima with a heading change above 15° count, so straight
+    tracks with varying speed do not register as turns.
     """
     if len(x) < 10:
         return {"speed_at_turn_points": np.nan}
@@ -1426,7 +1435,7 @@ def feat_motor_control(x: np.ndarray, y: np.ndarray,
     if n < 6:
         kappa = np.ones(len(dx) - 1) * np.nan
     else:
-        # Fix 4: divide by dt (multiply by fps) to get true acceleration d²x/dt²
+        # Multiply by fps (divide by dt) to get acceleration d²x/dt²
         ax_ = np.diff(vx) * fps                    # (n-2,) — true acceleration px/s²
         ay_ = np.diff(vy) * fps
         vx_ = vx[:-1]
@@ -1438,7 +1447,7 @@ def feat_motor_control(x: np.ndarray, y: np.ndarray,
             denom = sp_**3
             kappa = np.where(denom > 1e-6, cross / denom, np.nan)  # units: 1/px
 
-    # ── (a) Power-law regression: log|δv| ~ β·log(v) — G-2 fix ─────────────
+    # ── (a) Power-law regression: log|δv| ~ β·log(v) ───────────────────────
     # β≈1: proportional (muscle-driven) acceleration; β≈0: constant-magnitude noise
     if len(sp) >= 5:
         dv = np.abs(np.diff(sp))       # |speed increment| (n-2,)
@@ -1456,7 +1465,7 @@ def feat_motor_control(x: np.ndarray, y: np.ndarray,
         power_law_slope, r2 = np.nan, np.nan
 
     # ── (b) Min turn radius at max speed ────────────────────────────────────
-    # Fix 4: radius of curvature = 1/κ (not speed/κ)
+    # Radius of curvature = 1/κ
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         radius = np.where(kappa > 1e-8, 1.0 / (kappa + 1e-12), np.nan)  # units: px
@@ -1523,7 +1532,7 @@ def feat_levy_tail_advanced(x: np.ndarray, y: np.ndarray,
     if len(steps) < 8:
         return nan_r
 
-    # ── Hill estimator (top 20% of steps) — T-6/G-2 fix ─────────────────────
+    # ── Hill estimator (top 20% of steps) ───────────────────────────────────
     k = max(2, int(0.2 * len(steps)))
     X_sorted = np.sort(steps)
     X_k = X_sorted[-(k + 1)] if len(X_sorted) > k else X_sorted[0]
@@ -1532,11 +1541,10 @@ def feat_levy_tail_advanced(x: np.ndarray, y: np.ndarray,
         H_k = float(np.mean(np.log(top_k / (X_k + 1e-12))))
         if H_k > 1e-9:
             alpha_hat = 1.0 / H_k          # Pareto shape α: P(X>x) ∝ x^{-α}
-            levy_exp  = float(1.0 + alpha_hat)   # Fix: μ = α + 1, consistent with levy_mu
+            levy_exp  = float(1.0 + alpha_hat)   # μ = α + 1, consistent with levy_mu
         else:
             alpha_hat = levy_exp = np.nan
         # R² of Pareto fit: both CCDFs conditional on X > X_k, so scale by k not len(steps)
-        # Fix 7: was / len(steps), making empirical and fitted CCDFs incomparable
         if not np.isnan(levy_exp):
             empirical_ccdf = np.arange(k, 0, -1) / k
             fitted_ccdf    = (X_k / top_k) ** alpha_hat   # Pareto CCDF uses α
@@ -1549,7 +1557,7 @@ def feat_levy_tail_advanced(x: np.ndarray, y: np.ndarray,
         levy_exp, levy_r2 = np.nan, np.nan
 
     # ── Inter-burst burstiness ────────────────────────────────────────────────
-    # Fix 2: speed is px/s; threshold converted from 3 px/frame
+    # speed is in px/s; threshold converted from 3 px/frame
     burst_thr = max(3.0 * fps, float(np.percentile(speed, 75)))
     is_burst  = speed > burst_thr
     # Find inter-burst intervals (gap frames between burst runs)
@@ -1583,7 +1591,7 @@ def feat_levy_tail_advanced(x: np.ndarray, y: np.ndarray,
 # ---------------------------------------------------------------------------
 # d6_hover, d6_stopping, d6_landing, and d6_takeoff helpers
 def feat_hover_burst(speed: np.ndarray, fps: float) -> dict:
-    """F1 — Hover-burst transition count and durations.
+    """Hover-burst transition count and durations.
 
     Insects alternate between hovering (slow inspection) and bursting
     (fast flight to next location).  Wind plants stay slow or drift
@@ -1599,7 +1607,7 @@ def feat_hover_burst(speed: np.ndarray, fps: float) -> dict:
         return {"hover_burst_transitions": np.nan, "mean_hover_duration": np.nan,
                 "mean_burst_duration": np.nan}
 
-    # Fix 2: multiply by fps because speed is in px/s, not px/frame
+    # Multiply by fps because speed is in px/s, not px/frame
     # Unified burst threshold: max(3 px/frame, Q75) — matches feat_stops_bursts
     # and feat_landing_kinematics so the "burst" state is defined consistently.
     hover_thr = 0.5 * fps
@@ -1613,6 +1621,7 @@ def feat_hover_burst(speed: np.ndarray, fps: float) -> dict:
 
     # Run-length encoding for hover and burst durations
     def _run_lengths(mask: np.ndarray) -> list[int]:
+        """Lengths of consecutive True runs in mask."""
         runs = []
         count = 0
         for v in mask:
@@ -1666,9 +1675,9 @@ def feat_landing_kinematics(x: np.ndarray, y: np.ndarray,
     if n < 8:
         return nan_r
 
-    # Fix 2: speed thresholds in px/s (speed = step * fps).
+    # Speed thresholds in px/s (speed = step * fps).
     STOP_THR  = 1.0 * fps   # 1 px/frame → px/s   (compared against speed)
-    # Fix: the impulsive-start test compares an acceleration (acc, px/s²), so its
+    # The impulsive-start test compares an acceleration (acc, px/s²), so its
     # threshold must also be an acceleration. 3 px/frame² → 3 * fps² px/s². This
     # value corresponds exactly to the speed gaining 3 px/frame in a single frame.
     BURST_ACC_THR = 3.0 * fps * fps   # 3 px/frame² → px/s²  (compared against acc)
@@ -1812,7 +1821,7 @@ def extract_all_features(
     n = len(df)
 
     if n < 5:
-        # Fix: use actual frame span, not point count (consistent with feat_basic)
+        # Use the frame span, not the point count (consistent with feat_basic)
         dur_frames = int(frames[-1] - frames[0] + 1) if n >= 2 else n
         feats = {"n_points": n, "duration_frames": dur_frames, "duration_sec": dur_frames / fps}
         return _canonical_feature_order(feats)
@@ -1830,6 +1839,7 @@ def extract_all_features(
     calculated: dict = {}
 
     def collect(values: dict) -> None:
+        """Add computed values to the shared calculation pool."""
         calculated.update(values)
 
     collect(feat_basic(frames, fps))
@@ -1918,6 +1928,7 @@ def extract_all_features(
     feats: dict = {}
 
     def add_group(group_name: str) -> None:
+        """Copy one subgroup's features from the pool into the output, in canonical order."""
         for feature_name in FEATURE_GROUPS[group_name]:
             feats[feature_name] = calculated[feature_name]
 
@@ -2072,12 +2083,12 @@ def build_feature_table(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Extract six-domain biological motion features from insect tracks."
+        description="Phase 1 — Extract the 125 motion features from track CSVs."
     )
     p.add_argument("--tracks-dir", required=True)
     p.add_argument("--labels-csv", required=True)
     p.add_argument("--fps", type=float, required=True, help="Frames per second.")
-    p.add_argument("--output-csv", default="data/track_features.csv")
+    p.add_argument("--output-csv", default="data/results/trait_results/track_features.csv")
     p.add_argument("--xcol", default="sx")
     p.add_argument("--ycol", default="sy")
     p.add_argument("--fcol", default="nframe")
@@ -2090,7 +2101,7 @@ def parse_args() -> argparse.Namespace:
     # Batch / checkpoint mode
     p.add_argument("--batch-size", type=int, default=0,
                    help="Process N tracks per call and save checkpoint. 0 = all at once.")
-    p.add_argument("--ckpt-dir", default="data/feat_ckpts",
+    p.add_argument("--ckpt-dir", default="data/results/trait_results/feature_ckpts",
                    help="Directory for per-batch checkpoint CSVs.")
     p.add_argument("--finalize", action="store_true",
                    help="Concatenate all checkpoints into --output-csv and exit.")
@@ -2098,6 +2109,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Extract features for all labelled tracks and write the feature CSV.
+
+    With --batch-size, processes one batch per call and saves a checkpoint;
+    --finalize merges the checkpoints into --output-csv.
+    """
     args = parse_args()
     tracks_dir = Path(args.tracks_dir).expanduser().resolve()
     labels_csv = Path(args.labels_csv).expanduser().resolve()
