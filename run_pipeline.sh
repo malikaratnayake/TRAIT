@@ -1,9 +1,58 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_pipeline.sh — TRAIT Full Pipeline
+# run_pipeline.sh — TRAIT Full Pipeline (WACV #491 camera-ready revision)
 # =============================================================================
 #
-# Drives the complete insect-track classification pipeline end-to-end:
+# Mirrors run_pipeline.sh end-to-end, with the additions made for the
+# camera-ready revision (2026-08):
+#
+#   * Preprocessing-parity fix (Phase 3): train_fcn.py and train_rocket.py now
+#     gap-fill missing detections via the same linear-interpolation-then-SG-
+#     smoothing logic used by src/generate_features.py to build the engineered
+#     125-feature set (src/utils/smoothing.smooth_coords), instead of dropping
+#     missing-detection frames before smoothing. No change needed in this
+#     script for that fix — it lives inside train_fcn.py / train_rocket.py, so
+#     every call below already gets it.
+#
+#   * Transformer-family baselines (Phase 3, steps 3.4b/3.4c): two new
+#     sequence baselines, both sharing train_fcn.py's preprocessing/scaling/
+#     threshold/latency/CI harness so every sequence baseline and the
+#     engineered-feature classifiers consume an identical gap-filled,
+#     SG-smoothed trajectory.
+#       src/train_transformer.py  A compact Transformer encoder (linear
+#                projection, learnable positional embedding, standard
+#                nn.TransformerEncoder layers, length-masked mean pooling),
+#                trained with linear LR warmup + cosine decay (Transformers
+#                are warmup-sensitive in a way CNNs are not). Following the
+#                general encoder framework used for multivariate time-series
+#                representation learning / classification by Zerveas et al.
+#                (KDD 2021).
+#       src/train_convtran.py     A faithful reimplementation of ConvTran
+#                (Foumani et al., DMKD 2024): disjoint-CNN convolutional
+#                tokeniser, tAPE positional encoding, and eRPE relative-
+#                position attention.
+#     Added in response to reviewer requests for modern Transformer-based
+#     sequence baselines alongside the existing 1D-CNN and miniROCKET. No
+#     graph-based baseline is included: each sample is a single centroid
+#     trajectory with no interacting agents and no intrinsic spatial graph
+#     topology.
+#
+#   * ConvTran batch-size sensitivity sweep (Phase 3, step 3.4d) —
+#     SUPPLEMENTARY and OPT-IN via --convtran-batch-sweep "16 32 64 ...".
+#     ConvTran is trained at its published architecture defaults but at
+#     batch_size=128 rather than the official recipe's 16, for parity with the
+#     other sequence baselines; this sweep shows the reported result is stable
+#     across that choice. Off by default — a normal run is unaffected.
+#
+#     Note: a no-LR-warmup ablation of the Transformer encoder
+#     (--warmup-ratio 0) was also run during development to check that
+#     under-optimisation wasn't responsible for its result (PR-AUC 0.8068 vs
+#     0.8002 with warmup — statistically indistinguishable, ruling that out).
+#     It is not part of this automated pipeline and is not reported in the
+#     paper; src/train_transformer.py still accepts --warmup-ratio for anyone
+#     who wants to reproduce that check manually.
+#
+# Phases (identical structure to run_pipeline.sh):
 #
 #   Phase 1  Feature generation   — Savitzky-Golay smoothing (window=11, poly=2)
 #                                   applied to raw coordinates; 125 motion features
@@ -15,7 +64,8 @@
 #                                   Fold 4 is held out as the fixed test set.
 #
 #   Phase 3  Model performance    — Majority baseline, Logistic Regression,
-#                                   Random Forest, XGBoost, 1D-CNN, miniROCKET.
+#                                   Random Forest, XGBoost, 1D-CNN, miniROCKET,
+#                                   Transformer, ConvTran.
 #                                   Output: CSV comparison table + PR-AUC figure.
 #
 #   Phase 4  Cross-farm           — Farm A→B and B→A transfer (no adaptation).
@@ -43,9 +93,39 @@
 #   --splits-csv PATH    Override split CSV path
 #   --fold-strategy NAME Split strategy: stratified_group (default) or group
 #   --defer-sequence-baselines
-#                        Run Phase 4/5 before 1D-CNN and miniROCKET
+#                        Run Phase 4/5 before 1D-CNN, miniROCKET, Transformer,
+#                        and ConvTran
+#   --transformer-batch-size N
+#                        Override the Transformer's training/eval batch size
+#                        (default: train_transformer.py's own default, 128).
+#                        Lower this on memory-constrained machines — self-
+#                        attention memory scales with batch_size * max_len^2,
+#                        and at max_len=512 a batch size of 128 can exceed a
+#                        few GB of RAM. 16–32 is a safe starting point on
+#                        constrained hardware.
+#   --convtran-batch-size N
+#                        Override ConvTran's training/eval batch size (default:
+#                        train_convtran.py's own default, 128). Same memory
+#                        caveat as --transformer-batch-size applies (ConvTran's
+#                        eRPE attention is also O(max_len^2)).
+#   --convtran-batch-sweep "N N N"
+#                        OPT-IN supplementary study (step 3.4d). Trains ConvTran
+#                        once per listed batch size and writes a summary table,
+#                        to show the reported ConvTran result is stable across
+#                        this choice rather than an artefact of one setting
+#                        (batch_size=128 is a deliberate deviation from
+#                        ConvTran's published default of 16, chosen for parity
+#                        with the other sequence baselines). Pass a quoted,
+#                        space-separated list, e.g.
+#                          --convtran-batch-sweep "16 32 64 96 128 192"
+#                        SLOW: this is a full training run per batch size, and
+#                        smaller batch sizes take proportionally longer (more
+#                        optimiser steps per epoch). Omitted by default, so it
+#                        never affects a normal run. It writes to its own
+#                        convtran_batch_size_study/ directory and never touches
+#                        the reported ConvTran result in convtran_prauc/.
 #   --test-run           Reproducibility mode for final reporting: single-thread
-#                        model fitting, deterministic PyTorch, CPU FCN.
+#                        model fitting, deterministic PyTorch, CPU FCN/Transformer/ConvTran.
 #   --dry-run            Print commands without executing
 #   -h, --help           Show this help and exit
 #
@@ -54,8 +134,12 @@
 #   Re-running the script automatically skips completed steps.
 #   Use --overwrite-results or --from-phase N to override.
 #
-# 1D-CNN and miniROCKET (Phase 3) need torch and aeon respectively, installed
-# into the same environment as everything else — see requirements.txt.
+# 1D-CNN, Transformer, and ConvTran (Phase 3) need torch; miniROCKET needs
+# aeon — installed into the same environment as everything else, see
+# requirements.txt. No new dependencies were introduced for the Transformer
+# baselines, ConvTran, or the preprocessing fix beyond what run_pipeline.sh
+# already requires (ConvTran's attention is implemented with plain
+# reshape/permute rather than einops, to avoid a new dependency).
 # =============================================================================
 
 set -euo pipefail
@@ -89,6 +173,9 @@ FOLD_STRATEGY="stratified_group"
 DEFER_SEQUENCE_BASELINES=0
 TEST_RUN=0
 PIPELINE_MODEL_N_JOBS="${PIPELINE_MODEL_N_JOBS:--1}"
+TRANSFORMER_BATCH_SIZE="${TRANSFORMER_BATCH_SIZE:-}"
+CONVTRAN_BATCH_SIZE="${CONVTRAN_BATCH_SIZE:-}"
+CONVTRAN_BATCH_SWEEP="${CONVTRAN_BATCH_SWEEP:-}"
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -106,6 +193,12 @@ while [[ $# -gt 0 ]]; do
         --fold-strategy) FOLD_STRATEGY="$2"; shift 2 ;;
         --defer-sequence-baselines|--sequence-after-phase5)
                          DEFER_SEQUENCE_BASELINES=1; shift ;;
+        --transformer-batch-size)
+                         TRANSFORMER_BATCH_SIZE="$2"; shift 2 ;;
+        --convtran-batch-size)
+                         CONVTRAN_BATCH_SIZE="$2"; shift 2 ;;
+        --convtran-batch-sweep)
+                         CONVTRAN_BATCH_SWEEP="$2"; shift 2 ;;
         --test-run|--deterministic-run|--final-run)
                          TEST_RUN=1; shift ;;
         --dry-run)       DRY_RUN=1;          shift ;;
@@ -264,6 +357,8 @@ if [[ "$TEST_RUN" -eq 1 ]]; then
     export TRAIT_DETERMINISTIC=1
     export TRAIT_N_JOBS=1
     export TRAIT_FCN_DEVICE=cpu
+    export TRAIT_TRANSFORMER_DEVICE=cpu
+    export TRAIT_CONVTRAN_DEVICE=cpu
     export PYTHONHASHSEED=42
     export OMP_NUM_THREADS=1
     export MKL_NUM_THREADS=1
@@ -272,7 +367,7 @@ if [[ "$TEST_RUN" -eq 1 ]]; then
     export VECLIB_MAXIMUM_THREADS=1
     export NUMBA_NUM_THREADS=1
     export CUBLAS_WORKSPACE_CONFIG=:4096:8
-    log "  Test-run reproducibility mode: n_jobs=1, deterministic PyTorch, CPU FCN."
+    log "  Test-run reproducibility mode: n_jobs=1, deterministic PyTorch, CPU FCN/Transformer/ConvTran."
 else
     export TRAIT_N_JOBS="$PIPELINE_MODEL_N_JOBS"
 fi
@@ -313,7 +408,7 @@ export PIPELINE_FIGURES_DIR="$FIGURES_DIR"
 export PIPELINE_TRACKS_DIR="$TRACKS_DIR"
 export PIPELINE_FEATURE_COUNT="$FEATURE_COUNT"
 
-# Ensure all src scripts can resolve 'from src.models / src.utils' imports
+# Ensure all src scripts can resolve 'from src.models / src.utils / src.train_fcn' imports
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 # =============================================================================
@@ -513,9 +608,11 @@ ok "Phase 2 complete"
 # =============================================================================
 header "Phase 3 — Model Performance"
 log "  Models: Majority baseline · Logistic Regression · Random Forest ·"
-log "          XGBoost · 1D-CNN · miniROCKET"
+log "          XGBoost · 1D-CNN · miniROCKET · Transformer · ConvTran"
 log "  Selection metric: validation PR-AUC.  Threshold tuning: validation F1."
 log "  Final evaluation: held-out test set (fold 4).  Metric: PR-AUC, F1, Prec, Rec."
+log "  1D-CNN / miniROCKET / Transformer / ConvTran all share identical gap-filled,"
+log "  SG-smoothed preprocessing (src/utils/smoothing.smooth_coords)."
 
 # 3.1 Majority baseline
 STEP="p3_majority"
@@ -556,7 +653,7 @@ run_phase3_sequence_baselines() {
     # 3.3 1D-CNN with PR-AUC early stopping
     STEP="p3_fcn"
     if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
-        "$REPO/src/train_fcn.py" "$REPO/run_pipeline.sh"; then
+        "$REPO/src/train_fcn.py" "$REPO/src/utils/smoothing.py" "$REPO/run_pipeline.sh"; then
         log "3.3  Training 1D-CNN with PR-AUC early stopping …"
         if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
             warn "PyTorch not found in '$PYTHON' — skipping 1D-CNN"
@@ -580,7 +677,7 @@ run_phase3_sequence_baselines() {
     # 3.4 miniROCKET with PR-AUC ridge selection
     STEP="p3_rocket"
     if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
-        "$REPO/src/train_rocket.py" "$REPO/run_pipeline.sh"; then
+        "$REPO/src/train_rocket.py" "$REPO/src/utils/smoothing.py" "$REPO/run_pipeline.sh"; then
         log "3.4  Training miniROCKET with PR-AUC ridge selection …"
         if ! "$PYTHON" -c "import aeon" >/dev/null 2>&1; then
             warn "aeon not found in '$PYTHON' — skipping miniROCKET"
@@ -596,6 +693,110 @@ run_phase3_sequence_baselines() {
             mark_done "$STEP"
         fi
     fi
+
+    # 3.4b Transformer with LR warmup + PR-AUC early stopping (camera-ready
+    # revision addition). A no-warmup ablation was also run during
+    # development (see header comment) but is not part of this pipeline.
+    STEP="p3_transformer_warmup"
+    if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
+        "$REPO/src/train_transformer.py" "$REPO/src/train_fcn.py" "$REPO/run_pipeline.sh"; then
+        log "3.4b  Training Transformer with PR-AUC early stopping …"
+        if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+            warn "PyTorch not found in '$PYTHON' — skipping Transformer"
+            warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
+            mark_done "$STEP"
+        else
+            TRANSFORMER_ARGS=(
+                --max_len 512
+                --early-stop-metric pr_auc
+                --model-name Transformer_Warmup_PR_AUC
+                --output-dir "$RESULTS/transformer_warmup_prauc"
+            )
+            if [[ -n "$TRANSFORMER_BATCH_SIZE" ]]; then
+                TRANSFORMER_ARGS+=(--batch-size "$TRANSFORMER_BATCH_SIZE")
+            fi
+            if [[ "$TEST_RUN" -eq 1 ]]; then
+                TRANSFORMER_ARGS+=(--deterministic --device cpu)
+            fi
+            log "  Note: self-attention memory scales with batch_size * max_len^2."
+            log "  If this step is killed (OOM) on constrained hardware, re-run with"
+            log "  --transformer-batch-size 16 (or 32)."
+            run_cmd "$PYTHON" src/train_transformer.py "${TRANSFORMER_ARGS[@]}"
+            mark_done "$STEP"
+        fi
+    fi
+
+    # 3.4c ConvTran (camera-ready revision addition)
+    STEP="p3_convtran"
+    if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
+        "$REPO/src/train_convtran.py" "$REPO/src/train_transformer.py" "$REPO/src/train_fcn.py" \
+        "$REPO/run_pipeline.sh"; then
+        log "3.4c  Training ConvTran (Foumani et al., DMKD 2024) with PR-AUC early stopping …"
+        if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+            warn "PyTorch not found in '$PYTHON' — skipping ConvTran"
+            warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
+            mark_done "$STEP"
+        else
+            CONVTRAN_ARGS=(
+                --max_len 512
+                --early-stop-metric pr_auc
+                --model-name ConvTran_PR_AUC
+                --output-dir "$RESULTS/convtran_prauc"
+            )
+            if [[ -n "$CONVTRAN_BATCH_SIZE" ]]; then
+                CONVTRAN_ARGS+=(--batch-size "$CONVTRAN_BATCH_SIZE")
+            fi
+            if [[ "$TEST_RUN" -eq 1 ]]; then
+                CONVTRAN_ARGS+=(--deterministic --device cpu)
+            fi
+            log "  Note: eRPE attention memory also scales with batch_size * max_len^2."
+            log "  If this step is killed (OOM) on constrained hardware, re-run with"
+            log "  --convtran-batch-size 16 (or 32)."
+            run_cmd "$PYTHON" src/train_convtran.py "${CONVTRAN_ARGS[@]}"
+            mark_done "$STEP"
+        fi
+    fi
+
+    # 3.4d ConvTran batch-size sensitivity sweep — SUPPLEMENTARY, opt-in.
+    # Only runs when --convtran-batch-sweep is given, so a normal pipeline run
+    # is unaffected. Delegates to src/convtran_batch_size_study.py (which
+    # handles per-batch-size output dirs, resume, per-run failure isolation,
+    # and aggregation) rather than reimplementing that loop here. Writes to
+    # $RESULTS/convtran_batch_size_study/ and never touches the reported
+    # ConvTran result in $RESULTS/convtran_prauc/.
+    if [[ -n "$CONVTRAN_BATCH_SWEEP" ]]; then
+        STEP="p3_convtran_sweep"
+        if needs_run_with_deps "$STEP" 3 "$SPLITS_CSV" \
+            "$REPO/src/train_convtran.py" "$REPO/src/convtran_batch_size_study.py" \
+            "$REPO/run_pipeline.sh"; then
+            log "3.4d  ConvTran batch-size sweep (supplementary): [$CONVTRAN_BATCH_SWEEP] …"
+            if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+                warn "PyTorch not found in '$PYTHON' — skipping ConvTran batch-size sweep"
+                warn "To enable: $PYTHON -m pip install torch --index-url https://download.pytorch.org/whl/cpu"
+                mark_done "$STEP"
+            else
+                # IFS is $'\n\t' script-wide, so an unquoted expansion would NOT
+                # split on spaces. Split explicitly with IFS=' ' for this read.
+                IFS=' ' read -r -a CONVTRAN_SWEEP_SIZES <<< "$CONVTRAN_BATCH_SWEEP"
+                SWEEP_ARGS=(
+                    --batch-sizes "${CONVTRAN_SWEEP_SIZES[@]}"
+                    --max_len 512
+                    --early-stop-metric pr_auc
+                    --output-dir "$RESULTS"
+                    --python "$PYTHON"
+                )
+                if [[ "$TEST_RUN" -eq 1 ]]; then
+                    SWEEP_ARGS+=(--device cpu)
+                fi
+                log "  This trains ConvTran once per batch size — expect it to be SLOW."
+                log "  Smaller batch sizes take proportionally longer (more steps/epoch)."
+                log "  Already-completed batch sizes are skipped on re-run."
+                log "  Output: $RESULTS/convtran_batch_size_study/"
+                run_cmd "$PYTHON" src/convtran_batch_size_study.py "${SWEEP_ARGS[@]}"
+                mark_done "$STEP"
+            fi
+        fi
+    fi
 }
 
 run_phase3_summary_outputs() {
@@ -606,6 +807,8 @@ run_phase3_summary_outputs() {
         "$RESULTS/prauc_protocol/prauc_protocol_comparison.csv" \
         "$RESULTS/fcn_prauc/fcn_results.csv" \
         "$RESULTS/rocket_prauc/rocket_results.csv" \
+        "$RESULTS/transformer_warmup_prauc/transformer_results.csv" \
+        "$RESULTS/convtran_prauc/convtran_results.csv" \
         "$REPO/run_pipeline.sh"; then
         log "3.5  Building model comparison table …"
 	run_cmd "$PYTHON" - <<'PYEOF'
@@ -714,6 +917,29 @@ if rocket_csv.exists():
             "latency_mean_ms": row.get("latency_mean_ms"),
         })
 
+# Transformer-family baselines (camera-ready revision addition)
+transformer_stages = [
+    ("Transformer", R / "transformer_warmup_prauc" / "transformer_results.csv"),
+    ("ConvTran",    R / "convtran_prauc" / "convtran_results.csv"),
+]
+for label, csv_path in transformer_stages:
+    if csv_path.exists():
+        tdf = pd.read_csv(csv_path)
+        for _, row in tdf.iterrows():
+            rows.append({
+                "Model":           label,
+                "n_features":      "—",
+                "precision":       row.get("precision"),
+                "recall":          row.get("recall"),
+                "f1":              row.get("f1"),
+                "f1_ci_lo":        row.get("f1_lo"),
+                "f1_ci_hi":        row.get("f1_hi"),
+                "pr_auc":          row.get("pr_auc"),
+                "pr_auc_ci_lo":    row.get("pr_auc_lo"),
+                "pr_auc_ci_hi":    row.get("pr_auc_hi"),
+                "latency_mean_ms": row.get("latency_mean_ms"),
+            })
+
 if not rows:
     print("  No Phase 3 results found yet."); sys.exit(0)
 
@@ -721,15 +947,20 @@ df = pd.DataFrame(rows)
 out = Path(os.environ["PIPELINE_RESULTS"]) / "phase3_model_comparison.csv"
 df.to_csv(out, index=False)
 
-print(f"\n  {'Model':<26} {'#Feat':>6} {'Prec':>7} {'Rec':>7} {'F1':>7}  "
-      f"{'95% CI (F1)':^20}  {'PR-AUC':>7} {'ms/samp':>8}")
+# PR-AUC is the paper's primary, threshold-independent metric (Table 3:
+# "95% confidence intervals (CI) for PR-AUC were computed using 1000
+# bootstrap resamples of the test set"). The CI column below reports the
+# PR-AUC CI, not the F1 CI, to match that convention. f1_ci_lo/f1_ci_hi are
+# still written to the saved CSV for anyone who wants the F1 interval too.
+print(f"\n  {'Model':<26} {'#Feat':>6} {'PR-AUC':>7}  "
+      f"{'95% CI (PR-AUC)':^20}  {'F1':>7} {'Rec':>7} {'Prec':>7} {'ms/samp':>8}")
 print("  " + "─" * 96)
 for _, r in df.iterrows():
-    ci = (f"[{fmt(r['f1_ci_lo'])}–{fmt(r['f1_ci_hi'])}]"
-          if not nan(r.get("f1_ci_lo")) else "          —         ")
+    ci = (f"[{fmt(r['pr_auc_ci_lo'])}–{fmt(r['pr_auc_ci_hi'])}]"
+          if not nan(r.get("pr_auc_ci_lo")) else "          —         ")
     print(f"  {str(r['Model']):<26} {str(r['n_features']):>6} "
-          f"{fmt(r['precision']):>7} {fmt(r['recall']):>7} {fmt(r['f1']):>7}  "
-          f"{ci:^20}  {fmt(r['pr_auc']):>7} "
+          f"{fmt(r['pr_auc']):>7}  {ci:^20}  "
+          f"{fmt(r['f1']):>7} {fmt(r['recall']):>7} {fmt(r['precision']):>7} "
           f"{fmt(r.get('latency_mean_ms'),'.3f'):>8}")
 print(f"\n  Saved → {out}")
 PYEOF
@@ -744,9 +975,11 @@ PYEOF
         "$RESULTS/prauc_protocol/random_forest_prauc/random_forest_prauc_pr_curve.csv" \
         "$RESULTS/prauc_protocol/xgboost_prauc/xgboost_prauc_pr_curve.csv" \
         "$RESULTS/fcn_prauc/fcn_pr_auc_pr_curve.csv" \
+        "$RESULTS/transformer_warmup_prauc/transformer_warmup_pr_auc_pr_curve.csv" \
+        "$RESULTS/convtran_prauc/convtran_pr_auc_pr_curve.csv" \
         "$REPO/src/figures/plot_pr_curves.py" \
         "$REPO/run_pipeline.sh"; then
-        log "3.6  Plotting precision-recall curves …"
+        log "3.6  Plotting precision-recall curves (majority, LR, RF, XGBoost, 1D-CNN, miniROCKET, Transformer, ConvTran) …"
         mkdir -p "$FIGURES_DIR"
         run_cmd "$PYTHON" src/figures/plot_pr_curves.py \
             --results-dir "$RESULTS" \
@@ -757,7 +990,7 @@ PYEOF
 }
 
 if [[ "$DEFER_SEQUENCE_BASELINES" -eq 1 ]]; then
-    log "  [defer] 1D-CNN, miniROCKET, and Phase 3 summaries will run after Phase 5"
+    log "  [defer] 1D-CNN, miniROCKET, Transformer, ConvTran, and Phase 3 summaries will run after Phase 5"
     ok "Phase 3 tabular/core complete"
 else
     run_phase3_sequence_baselines
@@ -967,7 +1200,7 @@ ok "Phase 5 complete"
 
 if [[ "$DEFER_SEQUENCE_BASELINES" -eq 1 ]]; then
     header "Deferred Phase 3 — Sequence Baselines"
-    log "  Running deferred 1D-CNN and miniROCKET after Phases 4/5."
+    log "  Running deferred 1D-CNN, miniROCKET, Transformer, and ConvTran after Phases 4/5."
     run_phase3_sequence_baselines
     run_phase3_summary_outputs
     ok "Deferred Phase 3 sequence baselines complete"
@@ -985,15 +1218,21 @@ log "Results dir : $RESULTS"
 log "Log file    : $LOG_FILE"
 echo ""
 log "Key output files:"
-log "  Phase 1  features    → $FEATURES_CSV"
-log "  Phase 2  splits      → $SPLITS_CSV"
-log "  Phase 3  comparison  → $RESULTS/phase3_model_comparison.csv"
-log "           PR-AUC fig  → $FIGURES_DIR/phase3_precision_recall_curves.png"
-log "  Phase 4  cross-farm  → $RESULTS/cross_farm/cross_farm_results.csv"
-log "  Phase 5  ablation    → $RESULTS/ablation/"
-log "           cumulative  → $RESULTS/ablation/domain_ablation_results.csv"
-log "           single-dom  → $RESULTS/ablation/domain_only_results.csv"
-log "           group LOO   → $RESULTS/ablation/group_loo_ablation.csv"
-log "           LOO figure  → $FIGURES_DIR/group_loo_top_positive_negative.png"
-log "           trajectories→ $FIGURES_DIR/class_trajectory_overlays.png, session_trajectories_rank1.png"
+log "  Phase 1  features       → $FEATURES_CSV"
+log "  Phase 2  splits         → $SPLITS_CSV"
+log "  Phase 3  comparison     → $RESULTS/phase3_model_comparison.csv"
+log "           PR-AUC fig     → $FIGURES_DIR/phase3_precision_recall_curves.png"
+log "           1D-CNN         → $RESULTS/fcn_prauc/fcn_results.csv"
+log "           miniROCKET     → $RESULTS/rocket_prauc/rocket_results.csv"
+log "           Transformer     → $RESULTS/transformer_warmup_prauc/transformer_results.csv"
+log "           ConvTran        → $RESULTS/convtran_prauc/convtran_results.csv"
+if [[ -n "$CONVTRAN_BATCH_SWEEP" ]]; then
+log "           ConvTran sweep  → $RESULTS/convtran_batch_size_study/convtran_batch_size_summary.csv"
+fi
+log "  Phase 4  cross-farm     → $RESULTS/cross_farm/cross_farm_results.csv"
+log "  Phase 5  ablation       → $RESULTS/ablation/"
+log "           cumulative     → $RESULTS/ablation/domain_ablation_results.csv"
+log "           single-dom     → $RESULTS/ablation/domain_only_results.csv"
+log "           group LOO      → $RESULTS/ablation/group_loo_ablation.csv"
+log "           LOO figure     → $FIGURES_DIR/group_loo_top_positive_negative.png"
 echo ""
