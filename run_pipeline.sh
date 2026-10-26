@@ -541,8 +541,7 @@ if needs_run_with_deps "$STEP" 3 "$FEATURES_CSV" "$SPLITS_CSV" \
     run_cmd "$PYTHON" src/models/majority_baseline.py \
         --features-csv "$FEATURES_CSV" \
         --splits-csv   "$SPLITS_CSV" \
-        --output-dir   "$RESULTS" \
-        --models majority
+        --output-dir   "$RESULTS"
     mark_done "$STEP"
 fi
 
@@ -606,7 +605,6 @@ run_phase3_sequence_baselines() {
             run_cmd "$PYTHON" src/train_rocket.py \
                 --max_len 512 \
                 --n-jobs "$PIPELINE_MODEL_N_JOBS" \
-                --selection-metric pr_auc \
                 --model-name MiniROCKET_PR_AUC \
                 --output-dir "$RESULTS/rocket_prauc"
             mark_done "$STEP"
@@ -1040,11 +1038,6 @@ if needs_run_with_deps "$STEP" 5 \
         mkdir -p "$FIGURES_DIR"
         run_cmd "$PYTHON" src/figures/plot_group_loo.py \
             --input-csv  "$RESULTS/ablation/group_loo_ablation.csv" \
-            --output-csv "$RESULTS/ablation/group_loo_top_positive_negative.csv" \
-            --output-png "$FIGURES_DIR/group_loo_top_positive_negative.png" \
-            || warn "Group LOO F1 plot failed — continuing"
-        run_cmd "$PYTHON" src/figures/plot_group_loo.py \
-            --input-csv  "$RESULTS/ablation/group_loo_ablation.csv" \
             --output-csv "$RESULTS/ablation/group_loo_prauc_top_positive_negative.csv" \
             --output-png "$FIGURES_DIR/group_loo_prauc_top_positive_negative.png" \
             --metric pr_auc \
@@ -1114,5 +1107,5 @@ log "  Phase 5  ablation       → $RESULTS/ablation/"
 log "           cumulative     → $RESULTS/ablation/domain_ablation_results.csv"
 log "           single-dom     → $RESULTS/ablation/domain_only_results.csv"
 log "           group LOO      → $RESULTS/ablation/group_loo_ablation.csv"
-log "           LOO figure     → $FIGURES_DIR/group_loo_top_positive_negative.png"
+log "           LOO figure     → $FIGURES_DIR/group_loo_prauc_top_positive_negative.png"
 echo ""

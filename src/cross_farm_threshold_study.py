@@ -73,7 +73,6 @@ from src.models.data_loader import load_data, impute_train_eval
 # with the identical XGBoost specification — but nothing here writes back
 # into src/cross_farm.py or its outputs.
 from src.cross_farm import (
-    TIME_OF_DAY_FEATURE,
     _params_from_xgb_result,
     _threshold_from_xgb_result,
     _train_xgb,
@@ -155,8 +154,6 @@ def _metrics_at(y_true, y_prob, threshold):
 def run_threshold_study(df, feature_cols, xgb_params, deployed_threshold, out_dir: Path):
     print("\n── Supplementary study  Cross-farm threshold sensitivity ──────")
     print(f"  Deployed (fixed, pooled-training-tuned) threshold: {deployed_threshold:.4f}")
-
-    feature_cols = [f for f in feature_cols if f != TIME_OF_DAY_FEATURE]
 
     pred_rows, summary_rows = [], []
 
@@ -243,7 +240,6 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--features-csv", default="data/track_features.csv")
     p.add_argument("--splits-csv",   default="data/splits_folds.csv")
-    p.add_argument("--audit-csv",    default=None)
     p.add_argument("--output-dir",   default="data/results/six_domain_v1")
     p.add_argument("--xgb-params",   default=None)
     p.add_argument("--xgb-threshold", type=float, default=None,
@@ -258,7 +254,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading data …")
-    df, feature_cols, _ = load_data(args.features_csv, args.splits_csv, args.audit_csv)
+    df, feature_cols, _ = load_data(args.features_csv, args.splits_csv)
     print(f"  {len(df):,} tracks · {len(feature_cols)} features")
 
     xgb_threshold = args.xgb_threshold

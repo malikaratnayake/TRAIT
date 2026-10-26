@@ -1,7 +1,7 @@
 """
-src/train_rocket.py — MiniROCKET / MultiROCKET baseline (Phase 3)
-==================================================================
-Runs MiniROCKET (and optionally MultiROCKET) on the 28k insect-track dataset
+src/train_rocket.py — MiniROCKET baseline (Phase 3)
+==================================================
+Runs MiniROCKET on the 28k insect-track dataset
 using the same held-out test protocol as all other models:
   - Train : folds 0, 1, 2
   - Val   : fold 3  (threshold sweep)
@@ -13,15 +13,10 @@ Output:  data/results/six_domain_v1/rocket/rocket_results.csv
          data/results/six_domain_v1/rocket/rocket_predictions.csv
 
 Run from the TRAIT project root (aeon installed in trait-env, see requirements.txt):
-    python src/train_rocket.py [--max_len 128] [--multi]
+    python src/train_rocket.py [--max_len 512]
 
 Dependencies:
     aeon == 1.3.0, numba < 0.62, numpy < 2, scikit-learn, scipy, pandas
-
-If a `.venv-rocket` virtual environment exists at the project root, this script
-relaunches itself inside it automatically — a fallback for anyone who prefers
-to keep miniROCKET's older pinned dependencies isolated from the rest of the
-stack instead of installing them into trait-env.
 
 Preprocessing parity (2026-08 fix): gap-filling now reuses the exact
 linear-interpolation-then-SG-smoothing logic used by src/generate_features.py
@@ -42,28 +37,10 @@ from pathlib import Path
 os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ROCKET_VENV = PROJECT_ROOT / ".venv-rocket"
-ROCKET_PYTHON = ROCKET_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-
-
-def _bootstrap_isolated_environment():
-    """Relaunch direct script executions through the optional MiniROCKET venv, if present."""
-    if __name__ != "__main__" or not ROCKET_PYTHON.exists():
-        return
-    if Path(sys.prefix).resolve() == ROCKET_VENV.resolve():
-        return
-    print(f"Re-launching MiniROCKET with: {ROCKET_PYTHON}", flush=True)
-    os.execv(
-        str(ROCKET_PYTHON),
-        [str(ROCKET_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
-    )
-
-
-_bootstrap_isolated_environment()
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
+from sklearn.linear_model import RidgeClassifier
 from sklearn.metrics import (
     average_precision_score,
     f1_score,
@@ -95,7 +72,6 @@ TRACKS_DIR     = Path("data/tracks")
 SPLITS_CSV     = Path("data/splits_folds.csv")
 RESULTS_DIR    = Path("data/results/six_domain_v1/rocket")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-_DEFAULT_RESULTS_DIR = RESULTS_DIR
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -117,7 +93,7 @@ def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
         nans = np.isnan(arr)
         if nans.any() and (~nans).any():
             arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
-    sx, sy = smooth_coords(x, y, method="savgol", window_length=SG_WINDOW, polyorder=SG_POLY)
+    sx, sy = smooth_coords(x, y, window_length=SG_WINDOW, polyorder=SG_POLY)
     return sx.astype(np.float32), sy.astype(np.float32)
 
 
@@ -274,41 +250,32 @@ def resolve_rocket_n_jobs(n_jobs: int) -> int:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-def load_transformer_class(use_multi: bool):
-    """Import the requested aeon transformer after environment bootstrapping."""
-    model_name = "MultiROCKET" if use_multi else "MiniROCKET"
+def load_minirocket():
+    """Import aeon's MiniRocket transformer."""
     try:
-        if use_multi:
-            from aeon.transformations.collection.convolution_based import MultiRocket
-
-            return MultiRocket
         from aeon.transformations.collection.convolution_based import MiniRocket
 
         return MiniRocket
     except ImportError as exc:
-        print(f"ERROR: unable to import {model_name} from aeon: {exc}")
+        print(f"ERROR: unable to import MiniROCKET from aeon: {exc}")
         print(f"Reinstall with: {sys.executable} -m pip install -r requirements.txt")
         raise
 
 
-def check_dependencies(use_multi: bool = False):
+def check_dependencies():
     """Verify the transformer import without starting the experiment."""
-    model_name = "MultiROCKET" if use_multi else "MiniROCKET"
-    load_transformer_class(use_multi)
-    print(f"{model_name} dependency import OK: {sys.executable}")
+    load_minirocket()
+    print(f"MiniROCKET dependency import OK: {sys.executable}")
 
 
-def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = DEFAULT_N_JOBS,
-        selection_metric: str = "internal_cv", model_name: str | None = None,
-        limit: int | None = None):
-    if selection_metric not in {"internal_cv", "pr_auc"}:
-        raise ValueError("selection_metric must be either 'internal_cv' or 'pr_auc'")
-
-    model_name = model_name or ("MultiROCKET" if use_multi else "MiniROCKET")
+def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
+        model_name: str | None = None, limit: int | None = None):
+    model_name = model_name or "MiniROCKET"
+    selection_metric = "pr_auc"
     requested_n_jobs = int(n_jobs)
 
     # ── 1. Import aeon ──────────────────────────────────────────────────────
-    transformer_class = load_transformer_class(use_multi)
+    transformer_class = load_minirocket()
     n_jobs = resolve_rocket_n_jobs(requested_n_jobs)
 
     print(f"\n{'='*60}")
@@ -385,10 +352,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = D
     # ── 4. Fit ROCKET transform ─────────────────────────────────────────────
     print(f"Fitting {model_name} transform on train set…")
     t0 = time.time()
-    if use_multi:
-        rocket = transformer_class(n_jobs=n_jobs)
-    else:
-        rocket = transformer_class(n_kernels=N_KERNELS, random_state=SEED, n_jobs=n_jobs)
+    rocket = transformer_class(n_kernels=N_KERNELS, random_state=SEED, n_jobs=n_jobs)
     rocket.fit(X_train)
     print(f"  Fit done in {time.time()-t0:.1f}s")
 
@@ -414,20 +378,16 @@ def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = D
     print("\nFitting Ridge classifier on train (for threshold sweep)…")
     alphas = np.logspace(-4, 4, 20)
     selected_alpha = None
-    selected_alpha_pr_auc = None
-    if selection_metric == "pr_auc":
-        best_ap = -1.0
-        for alpha in alphas:
-            candidate = RidgeClassifier(alpha=float(alpha), class_weight="balanced")
-            candidate.fit(Xf_train, y_train)
-            score = average_precision_score(y_val, candidate.decision_function(Xf_val))
-            if score > best_ap:
-                best_ap, selected_alpha = float(score), float(alpha)
-        selected_alpha_pr_auc = best_ap
-        ridge_inner = RidgeClassifier(alpha=selected_alpha, class_weight="balanced")
-        print(f"  Selected alpha={selected_alpha:.6g}  (val PR-AUC={best_ap:.4f})")
-    else:
-        ridge_inner = RidgeClassifierCV(alphas=alphas, class_weight="balanced")
+    best_ap = -1.0
+    for alpha in alphas:
+        candidate = RidgeClassifier(alpha=float(alpha), class_weight="balanced")
+        candidate.fit(Xf_train, y_train)
+        score = average_precision_score(y_val, candidate.decision_function(Xf_val))
+        if score > best_ap:
+            best_ap, selected_alpha = float(score), float(alpha)
+    selected_alpha_pr_auc = best_ap
+    ridge_inner = RidgeClassifier(alpha=selected_alpha, class_weight="balanced")
+    print(f"  Selected alpha={selected_alpha:.6g}  (val PR-AUC={best_ap:.4f})")
     ridge_inner.fit(Xf_train, y_train)
 
     # ROCKET's decision_function is signed distance → use for threshold sweep
@@ -444,10 +404,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = D
 
     # ── 6. Retrain on train+val, evaluate on test ───────────────────────────
     print("\nRetraining on train+val for final evaluation…")
-    if selection_metric == "pr_auc":
-        ridge_final = RidgeClassifier(alpha=selected_alpha, class_weight="balanced")
-    else:
-        ridge_final = RidgeClassifierCV(alphas=alphas, class_weight="balanced")
+    ridge_final = RidgeClassifier(alpha=selected_alpha, class_weight="balanced")
     ridge_final.fit(Xf_trainval, y_trainval)
 
     test_scores = ridge_final.decision_function(Xf_test)
@@ -519,31 +476,12 @@ def run(max_len: int = MAX_LEN_DEFAULT, use_multi: bool = False, n_jobs: int = D
     return results
 
 
-# ─── Sensitivity sweep ────────────────────────────────────────────────────────
-
-def sweep_max_len():
-    """Run MiniROCKET at max_len ∈ {64, 128, 256} to find the sweet spot."""
-    rows = []
-    for ml in [64, 128, 256]:
-        r = run(max_len=ml, use_multi=False)
-        rows.append(r)
-    summary = pd.concat(rows, ignore_index=True)
-    path = RESULTS_DIR / "rocket_sweep.csv"
-    summary.to_csv(path, index=False)
-    print(f"\nSweep results saved → {path}")
-    print(summary.to_string(index=False))
-
-
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MiniROCKET / MultiROCKET TSC experiment")
+    parser = argparse.ArgumentParser(description="MiniROCKET time-series classification baseline")
     parser.add_argument("--max_len", type=int, default=MAX_LEN_DEFAULT,
                         help=f"Pad/truncate tracks to this many frames (default: {MAX_LEN_DEFAULT})")
-    parser.add_argument("--multi",   action="store_true",
-                        help="Use MultiROCKET instead of MiniROCKET")
-    parser.add_argument("--sweep",   action="store_true",
-                        help="Run MiniROCKET at max_len=[64,128,256] and report sweep")
     parser.add_argument("--check-deps", action="store_true",
                         help="Verify the aeon transformer import and exit")
     parser.add_argument("--output-dir", default=None,
@@ -554,9 +492,6 @@ if __name__ == "__main__":
                             "joblib semantics and are resolved to an explicit numba-safe count "
                             "(default: TRAIT_N_JOBS, ROCKET_N_JOBS, or -1)."
                         ))
-    parser.add_argument("--selection-metric", choices=["internal_cv", "pr_auc"],
-                        default="internal_cv",
-                        help="Ridge alpha selection metric (default: internal_cv)")
     parser.add_argument("--model-name", default=None,
                         help="Model label written to result files")
     parser.add_argument("--limit", type=int, default=None,
@@ -568,10 +503,7 @@ if __name__ == "__main__":
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.check_deps:
-        check_dependencies(use_multi=args.multi)
-    elif args.sweep:
-        sweep_max_len()
+        check_dependencies()
     else:
-        run(max_len=args.max_len, use_multi=args.multi, n_jobs=args.n_jobs,
-            selection_metric=args.selection_metric, model_name=args.model_name,
-            limit=args.limit)
+        run(max_len=args.max_len, n_jobs=args.n_jobs,
+            model_name=args.model_name, limit=args.limit)

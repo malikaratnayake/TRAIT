@@ -8,7 +8,6 @@ Public API
   compute_metrics(y_true, y_pred, y_prob)  -> dict
   bootstrap_ci(y_true, y_pred, y_prob, n_boot, seed)  -> dict of (mean, lo, hi)
   measure_latency(predict_fn, X_sample, n_reps)  -> dict
-  mcnemar_test(y_true, y_pred_a, y_pred_b)  -> (statistic, p_value)
   save_results(results, out_dir, stem)
 """
 
@@ -21,7 +20,6 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
     average_precision_score, matthews_corrcoef,
@@ -149,30 +147,7 @@ def measure_latency(
 
 
 # ---------------------------------------------------------------------------
-# McNemar's test
-# ---------------------------------------------------------------------------
-
-def mcnemar_test(
-    y_true: np.ndarray,
-    y_pred_a: np.ndarray,
-    y_pred_b: np.ndarray,
-) -> tuple[float, float]:
-    """Paired McNemar's test: are model A and B significantly different?
-
-    Returns (statistic, p_value). p < 0.05 → significant difference.
-    """
-    # Discordant counts
-    b = int(((y_pred_a == y_true) & (y_pred_b != y_true)).sum())  # A right, B wrong
-    c = int(((y_pred_a != y_true) & (y_pred_b == y_true)).sum())  # A wrong, B right
-    if b + c == 0:
-        return 0.0, 1.0
-    stat = (abs(b - c) - 1) ** 2 / (b + c)  # continuity-corrected
-    p = float(1 - chi2.cdf(stat, df=1))
-    return round(float(stat), 4), round(p, 4)
-
-
-# ---------------------------------------------------------------------------
-# Save / load helpers
+# Save helper
 # ---------------------------------------------------------------------------
 
 def save_results(results: dict, out_dir: Path, stem: str) -> None:
@@ -182,23 +157,3 @@ def save_results(results: dict, out_dir: Path, stem: str) -> None:
     with open(path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"  Saved {path.name}")
-
-
-def load_results(out_dir: Path, stem: str) -> dict:
-    path = out_dir / f"{stem}.json"
-    with open(path) as f:
-        return json.load(f)
-
-
-def results_to_row(name: str, metrics: dict, ci: dict, latency: dict | None = None) -> dict:
-    """Flatten metrics + CI + latency into one summary row."""
-    row = {"model": name}
-    for k in ("f1", "precision", "recall", "pr_auc", "roc_auc", "mcc"):
-        if k in metrics:
-            row[k] = metrics[k]
-        if k in ci:
-            row[f"{k}_lo"] = ci[k]["lo"]
-            row[f"{k}_hi"] = ci[k]["hi"]
-    if latency:
-        row.update(latency)
-    return row

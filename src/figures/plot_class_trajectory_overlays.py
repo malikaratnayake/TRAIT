@@ -52,8 +52,6 @@ ORANGE = "#D6604D"
 AXIS_LABEL_SIZE = 14
 TICK_LABEL_SIZE = 12
 LEGEND_SIZE = AXIS_LABEL_SIZE
-PANEL_TITLE_SIZE = 14
-ANNOTATION_SIZE = 11
 
 
 parser = argparse.ArgumentParser(description="Plot class-conditional trajectory overlays.")
@@ -182,8 +180,6 @@ fig.subplots_adjust(wspace=0.05, bottom=0.2)
 draw_panel(ax_ni,  ni_tracks,  ORANGE)
 draw_panel(ax_ins, ins_tracks, BLUE)
 
-ax_ins.set_title("")
-ax_ni.set_title("")
 ax_ni.set_ylabel("y (pixels)", fontsize=AXIS_LABEL_SIZE)   # shared y title
 ax_ins.tick_params(axis="y", labelleft=False)                 # shared y ticks
 

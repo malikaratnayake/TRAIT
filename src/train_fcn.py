@@ -162,7 +162,7 @@ def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
         nans = np.isnan(arr)
         if nans.any() and (~nans).any():
             arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
-    sx, sy = smooth_coords(x, y, method="savgol", window_length=SG_WINDOW, polyorder=SG_POLY)
+    sx, sy = smooth_coords(x, y, window_length=SG_WINDOW, polyorder=SG_POLY)
     return sx.astype(np.float32), sy.astype(np.float32)
 
 

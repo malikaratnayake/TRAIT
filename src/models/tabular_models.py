@@ -419,7 +419,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 2 PR-AUC protocol model variants")
     parser.add_argument("--features-csv", default="data/results/six_domain_v1/track_features.csv")
     parser.add_argument("--splits-csv", default="data/splits_folds.csv")
-    parser.add_argument("--audit-csv", default="data/data_audit_report.csv")
     parser.add_argument("--output-dir", default="data/results/six_domain_v1")
     parser.add_argument(
         "--n-jobs",
@@ -441,13 +440,12 @@ def main() -> None:
     args = parse_args()
     features_csv = Path(args.features_csv).expanduser().resolve()
     splits_csv = Path(args.splits_csv).expanduser().resolve()
-    audit_csv = Path(args.audit_csv).expanduser().resolve()
     root_out = Path(args.output_dir).expanduser().resolve()
     out_dir = root_out / "prauc_protocol"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading data ...")
-    df, feature_cols, _ = load_data(features_csv, splits_csv, audit_csv)
+    df, feature_cols, _ = load_data(features_csv, splits_csv)
 
     rows = []
     if "lr" in args.models:

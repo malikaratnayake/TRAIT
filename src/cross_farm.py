@@ -40,10 +40,6 @@ from src.models.evaluate import compute_metrics, bootstrap_ci, save_results
 SEED   = 42
 N_BOOT = 1000
 
-# Metadata-derived column name kept only so it can be defensively dropped if a
-# stale feature CSV still contains it. It is never used as a model feature.
-TIME_OF_DAY_FEATURE = "time_of_day_bucket"
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,8 +103,8 @@ def _within_farm_split(df, farm, feature_cols):
     return X_tr, y_tr, X_te, y_te
 
 
-def _run_one_variant(df, feature_cols, xgb_params, xgb_threshold, variant_label):
-    """Run all four cross-farm evaluations for a given feature set."""
+def _run_evaluations(df, feature_cols, xgb_params, xgb_threshold):
+    """Run the two within-farm and two cross-farm evaluations."""
     rows = []
     threshold = float(xgb_threshold)
 
@@ -117,10 +113,9 @@ def _run_one_variant(df, feature_cols, xgb_params, xgb_threshold, variant_label)
         X_tr, y_tr, X_te, y_te = _within_farm_split(df, farm, feature_cols)
 
         if len(X_te) < 5 or len(np.unique(y_te)) < 2:
-            print(f"  [{variant_label}] {farm} within-farm: insufficient test samples "
+            print(f"  {farm} within-farm: insufficient test samples "
                   f"(n={len(X_te)}) — skipping")
             rows.append({
-                "variant": variant_label,
                 "evaluation": f"within_{farm}",
                 "train": farm, "test": farm,
                 "n_train": int(len(X_tr)), "n_test": int(len(X_te)),
@@ -138,13 +133,12 @@ def _run_one_variant(df, feature_cols, xgb_params, xgb_threshold, variant_label)
         m  = compute_metrics(y_te, y_pred, y_prob)
         ci = bootstrap_ci(y_te, y_pred, y_prob, n_boot=N_BOOT, seed=SEED)
 
-        print(f"  [{variant_label}] Within {farm:<8}  n_train={len(X_tr):>5,}  "
+        print(f"  Within {farm:<8}  n_train={len(X_tr):>5,}  "
               f"n_test={len(X_te):>4,}  F1={m['f1']:.4f} "
               f"[{ci['f1']['lo']:.4f}–{ci['f1']['hi']:.4f}]  "
               f"prec={m['precision']:.4f}  rec={m['recall']:.4f}")
 
         rows.append({
-            "variant": variant_label,
             "evaluation": f"within_{farm}",
             "train": farm, "test": farm,
             "n_train": int(len(X_tr)), "n_test": int(len(X_te)),
@@ -165,13 +159,12 @@ def _run_one_variant(df, feature_cols, xgb_params, xgb_threshold, variant_label)
         m  = compute_metrics(y_te, y_pred, y_prob)
         ci = bootstrap_ci(y_te, y_pred, y_prob, n_boot=N_BOOT, seed=SEED)
 
-        print(f"  [{variant_label}] {train_farm} → {test_farm}  "
+        print(f"  {train_farm} → {test_farm}  "
               f"n_train={len(X_tr):>5,}  n_test={len(X_te):>4,}  "
               f"F1={m['f1']:.4f} [{ci['f1']['lo']:.4f}–{ci['f1']['hi']:.4f}]  "
               f"prec={m['precision']:.4f}  rec={m['recall']:.4f}")
 
         rows.append({
-            "variant": variant_label,
             "evaluation": f"{train_farm}_to_{test_farm}",
             "train": train_farm, "test": test_farm,
             "n_train": int(len(X_tr)), "n_test": int(len(X_te)),
@@ -209,31 +202,15 @@ def run_cross_farm(
     except ImportError:
         print("  xgboost not installed — skipping"); return pd.DataFrame()
 
-    # Defensively drop any metadata-derived column that may linger in a stale CSV.
-    feature_cols = [f for f in feature_cols if f != TIME_OF_DAY_FEATURE]
-
-    all_rows = []
-
-    # ── Standard feature set (intrinsic motion only) ────────────────────────
-    print("\n  Variant: intrinsic motion features only")
-    all_rows.extend(
-        _run_one_variant(
-            df,
-            feature_cols,
-            xgb_params,
-            xgb_threshold=xgb_threshold,
-            variant_label="no_diel",
-        )
+    result_df = pd.DataFrame(
+        _run_evaluations(df, feature_cols, xgb_params, xgb_threshold=xgb_threshold)
     )
 
-    result_df = pd.DataFrame(all_rows)
-
     # ── Generalisation gap summary ────────────────────────────────────────────
-    print("\n  Generalisation gap summary (variant: no_diel):")
-    no_diel = result_df[result_df["variant"] == "no_diel"]
+    print("\n  Generalisation gap summary:")
     for train_farm, test_farm in [("Farm_A", "Farm_B"), ("Farm_B", "Farm_A")]:
-        within_row = no_diel[no_diel["evaluation"] == f"within_{train_farm}"]
-        cross_row  = no_diel[no_diel["evaluation"] == f"{train_farm}_to_{test_farm}"]
+        within_row = result_df[result_df["evaluation"] == f"within_{train_farm}"]
+        cross_row  = result_df[result_df["evaluation"] == f"{train_farm}_to_{test_farm}"]
         if within_row.empty or cross_row.empty:
             continue
         w_f1 = within_row.iloc[0]["f1"]
@@ -245,23 +222,6 @@ def run_cross_farm(
         flag    = "✓ GOOD" if pct_gap < 6 else ("⚠ ACCEPTABLE" if pct_gap < 10 else "✗ LARGE")
         print(f"  {train_farm}→{test_farm}:  within={w_f1:.4f}  "
               f"cross={c_f1:.4f}  gap={gap:+.4f} ({pct_gap:.1f}%)  {flag}")
-
-    # ── Diel feature contribution ─────────────────────────────────────────────
-    if "with_diel" in result_df["variant"].values:
-        print("\n  Diel feature contribution (with_diel - no_diel):")
-        for eval_name in result_df["evaluation"].unique():
-            nd = result_df[(result_df["variant"] == "no_diel") &
-                           (result_df["evaluation"] == eval_name)]
-            wd = result_df[(result_df["variant"] == "with_diel") &
-                           (result_df["evaluation"] == eval_name)]
-            if nd.empty or wd.empty:
-                continue
-            nd_f1 = nd.iloc[0]["f1"]
-            wd_f1 = wd.iloc[0]["f1"]
-            if nd_f1 is None or wd_f1 is None:
-                continue
-            delta = round(float(wd_f1) - float(nd_f1), 4)
-            print(f"  {eval_name:<35}  Δ={delta:+.4f}")
 
     # ── Save ─────────────────────────────────────────────────────────────────
     out_cf = out_dir / "cross_farm"
@@ -281,7 +241,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Phase 5 — Cross-farm generalisation")
     p.add_argument("--features-csv", default="data/track_features.csv")
     p.add_argument("--splits-csv",   default="data/splits_folds.csv")
-    p.add_argument("--audit-csv",    default=None)
     p.add_argument("--output-dir",   default="data/results/six_domain_v1")
     p.add_argument("--xgb-params",   default=None)
     p.add_argument("--xgb-threshold", type=float, default=None,
@@ -297,7 +256,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading data …")
-    df, feature_cols, _ = load_data(args.features_csv, args.splits_csv, args.audit_csv)
+    df, feature_cols, _ = load_data(args.features_csv, args.splits_csv)
     print(f"  {len(df):,} tracks · {len(feature_cols)} features")
 
     xgb_threshold = args.xgb_threshold

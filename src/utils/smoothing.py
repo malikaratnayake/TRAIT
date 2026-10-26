@@ -1,40 +1,20 @@
 """
 src/utils/smoothing.py
 ======================
-Coordinate smoothing utilities shared by process_track.py and
-smoothing_experiment.py.
-
-Two methods are supported:
-
-  savgol   — Savitzky-Golay filter (default, polynomial fit in a sliding
-              window; good at preserving sharp direction changes)
-  gaussian — Gaussian convolution (σ in pixels; suppresses high-frequency
-              jitter more uniformly; tested in Step 1.2)
+Gap filling and Savitzky–Golay smoothing of centroid coordinates (paper
+Sec. 3.2). Shared by src/generate_features.py and the sequence baselines
+(src/train_fcn.py, src/train_rocket.py, src/train_convtran.py) so that every
+model sees the same preprocessed trajectory.
 
 Public API
 ----------
-  smooth_coords(x, y, method, **kwargs) -> (sx, sy)   numpy arrays
-  smooth_track_df(df, method, **kwargs)  -> df         with sx / sy added
+  smooth_coords(x, y, window_length=11, polyorder=2) -> (sx, sy)   numpy arrays
 """
 
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
-from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
-
-
-# ---------------------------------------------------------------------------
-# Low-level helpers
-# ---------------------------------------------------------------------------
-
-def _interpolate_1d(series: pd.Series, frame_index: pd.Series) -> np.ndarray:
-    """Linear interpolation for NaN gaps; returns a float numpy array."""
-    s = series.copy().astype(float)
-    s.index = frame_index
-    s = s.interpolate(method="linear", limit_direction="both")
-    return s.to_numpy(dtype=float)
 
 
 def _pick_savgol_window(n: int, requested: int) -> int | None:
@@ -49,28 +29,24 @@ def _pick_savgol_window(n: int, requested: int) -> int | None:
     return window
 
 
-# ---------------------------------------------------------------------------
-# Core smoothing
-# ---------------------------------------------------------------------------
-
 def smooth_coords(
     x: np.ndarray,
     y: np.ndarray,
-    method: str = "savgol",
     *,
     window_length: int = 11,
     polyorder: int = 2,
-    sigma: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Smooth (x, y) coordinate arrays.
+    """Gap-fill and Savitzky–Golay smooth (x, y) coordinate arrays.
+
+    NaN gaps are filled by linear interpolation first. For tracks shorter than
+    window_length the largest valid odd window is used; tracks too short to
+    filter are returned interpolated but unsmoothed.
 
     Parameters
     ----------
     x, y          : 1-D float arrays (NaNs allowed — will be interpolated first)
-    method        : 'savgol' or 'gaussian'
-    window_length : Savitzky-Golay window size (odd integer, savgol only)
-    polyorder     : Savitzky-Golay polynomial order (savgol only)
-    sigma         : Gaussian σ in frames (gaussian only)
+    window_length : Savitzky–Golay window size (odd integer)
+    polyorder     : Savitzky–Golay polynomial order
 
     Returns
     -------
@@ -90,72 +66,9 @@ def smooth_coords(
         if nans.any() and (~nans).any():
             arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
 
-    if method == "gaussian":
-        sx = gaussian_filter1d(x, sigma=sigma)
-        sy = gaussian_filter1d(y, sigma=sigma)
-        return sx, sy
-
-    if method == "savgol":
-        w = _pick_savgol_window(n, window_length)
-        if w is None or w <= polyorder:
-            return x.copy(), y.copy()
-        sx = savgol_filter(x, w, polyorder)
-        sy = savgol_filter(y, w, polyorder)
-        return sx, sy
-
-    raise ValueError(f"Unknown smoothing method: {method!r}. Use 'savgol' or 'gaussian'.")
-
-
-# ---------------------------------------------------------------------------
-# DataFrame-level helper
-# ---------------------------------------------------------------------------
-
-def smooth_track_df(
-    df: pd.DataFrame,
-    method: str = "savgol",
-    *,
-    xcol: str = "x",
-    ycol: str = "y",
-    frame_col: str = "nframe",
-    window_length: int = 11,
-    polyorder: int = 2,
-    sigma: float = 1.0,
-    round_int: bool = False,   # S-1 fix: was True — integer rounding destroys sub-pixel residuals
-) -> pd.DataFrame:
-    """Add sx / sy columns to a track DataFrame.
-
-    Trims trailing all-NaN rows, interpolates gaps, then smooths.
-    If round_int=True the smoothed values are rounded and stored as Int64
-    (nullable integer).  Default is False to preserve sub-pixel precision
-    needed by wing-beat residual features.
-    """
-    df = df.copy()
-
-    # Trim rows after the last valid x/y
-    last_valid = df[[xcol, ycol]].dropna().index.max()
-    if pd.isna(last_valid):
-        df["sx"] = pd.NA
-        df["sy"] = pd.NA
-        return df
-    df = df.loc[:last_valid]
-
-    fi = df[frame_col] if frame_col in df.columns else pd.Series(range(len(df)))
-    x_interp = _interpolate_1d(df[xcol], fi)
-    y_interp = _interpolate_1d(df[ycol], fi)
-
-    sx, sy = smooth_coords(
-        x_interp, y_interp,
-        method=method,
-        window_length=window_length,
-        polyorder=polyorder,
-        sigma=sigma,
-    )
-
-    if round_int:
-        df["sx"] = pd.array(np.round(sx).astype(float), dtype=pd.Int64Dtype())
-        df["sy"] = pd.array(np.round(sy).astype(float), dtype=pd.Int64Dtype())
-    else:
-        df["sx"] = sx
-        df["sy"] = sy
-
-    return df
+    w = _pick_savgol_window(n, window_length)
+    if w is None or w <= polyorder:
+        return x.copy(), y.copy()
+    sx = savgol_filter(x, w, polyorder)
+    sy = savgol_filter(y, w, polyorder)
+    return sx, sy

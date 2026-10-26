@@ -1772,36 +1772,6 @@ def feat_landing_kinematics(x: np.ndarray, y: np.ndarray,
 
 
 # ===========================================================================
-# TRACKER-QUALITY FEATURES (optional, excluded from biological hierarchy)
-# ===========================================================================
-def feat_tracker(df: pd.DataFrame, fcol: str = "nframe") -> dict:
-    """Tracker-derived features (DL detection precision, confidence).
-
-    These are EXCLUDED by default because they depend on the tracker
-    implementation and hurt cross-farm generalisation.  Include only
-    for within-farm ablation experiments.
-    """
-    method_col = next((c for c in df.columns if "detection_method" in c.lower()), None)
-    if method_col is None:
-        return {"dl_prec": 0.0, "avg_dl_conf": 0.0, "std_dl_conf": 0.0}
-
-    m = df[method_col].astype(str).str.strip().str.lower()
-    dl_mask = m.eq("dl")
-    total = len(df)
-    dl_frames = int(dl_mask.sum())
-    dl_prec = dl_frames / total if total > 0 else 0.0
-
-    if dl_frames == 0 or "confidence" not in df.columns:
-        return {"dl_prec": dl_prec, "avg_dl_conf": 0.0, "std_dl_conf": 0.0}
-
-    conf = pd.to_numeric(df.loc[dl_mask, "confidence"], errors="coerce").dropna()
-    return {
-        "dl_prec": dl_prec,
-        "avg_dl_conf": float(conf.mean()) if len(conf) else 0.0,
-        "std_dl_conf": float(conf.std(ddof=0)) if len(conf) else 0.0,
-    }
-
-# ===========================================================================
 # MASTER FEATURE EXTRACTION
 # ===========================================================================
 
@@ -1813,7 +1783,6 @@ def extract_all_features(
     fcol: str = "nframe",
     xcol_raw: str = "x",
     ycol_raw: str = "y",
-    use_tracker_features: bool = False,
     filename: str = "",
 ) -> dict:
     """Extract all features from a single track DataFrame.
@@ -1826,8 +1795,6 @@ def extract_all_features(
     fcol                  : frame index column
     xcol_raw, ycol_raw    : raw coordinate columns for residual features
                             (x, y) — used by feat_wingbeat_residuals
-    use_tracker_features  : include tracker confidence features outside the
-                            biological hierarchy (off by default)
 
     Returns
     -------
@@ -1848,8 +1815,6 @@ def extract_all_features(
         # Fix: use actual frame span, not point count (consistent with feat_basic)
         dur_frames = int(frames[-1] - frames[0] + 1) if n >= 2 else n
         feats = {"n_points": n, "duration_frames": dur_frames, "duration_sec": dur_frames / fps}
-        if use_tracker_features:
-            feats.update(feat_tracker(df_full))
         return _canonical_feature_order(feats)
 
     dx, dy = np.diff(x), np.diff(y)
@@ -2012,10 +1977,6 @@ def extract_all_features(
     add_group("d6_landing")
     add_group("d6_takeoff")
 
-    # --- Optional tracker confidence features outside the hierarchy ---
-    if use_tracker_features:
-        feats.update(feat_tracker(df_full))   # Fix 1: was df (reduced); need df_full
-
     return _canonical_feature_order(feats)
 
 
@@ -2032,7 +1993,6 @@ def build_feature_table(
     fcol: str = "nframe",
     file_col: str = "filepath",
     label_col: str = "label",
-    use_tracker_features: bool = False,
     sg_window: int = 11,
     sg_poly: int = 2,
 ) -> tuple[pd.DataFrame, dict]:
@@ -2082,7 +2042,6 @@ def build_feature_table(
                     arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
             sx, sy = smooth_coords(
                 x_raw, y_raw,
-                method="savgol",
                 window_length=sg_window,
                 polyorder=sg_poly,
             )
@@ -2097,7 +2056,6 @@ def build_feature_table(
         feats = extract_all_features(
             df, fps=fps, xcol=xcol, ycol=ycol, fcol=fcol,
             xcol_raw="x", ycol_raw="y",
-            use_tracker_features=use_tracker_features,
             filename=fname,
         )
         feats["label"] = y_bin
@@ -2123,8 +2081,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--xcol", default="sx")
     p.add_argument("--ycol", default="sy")
     p.add_argument("--fcol", default="nframe")
-    p.add_argument("--use-tracker-features", action="store_true",
-                   help="Include tracker-quality features outside the biological hierarchy (not recommended for cross-farm).")
     p.add_argument("--no-save", action="store_true", help="Skip saving output CSV.")
     # Savitzky-Golay on-the-fly smoothing (used when sx/sy absent from CSVs)
     p.add_argument("--sg-window", type=int, default=11,
@@ -2218,7 +2174,7 @@ def main() -> None:
                     nans = np.isnan(arr)
                     if nans.any() and (~nans).any():
                         arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
-                sx, sy = smooth_coords(x_raw, y_raw, method="savgol",
+                sx, sy = smooth_coords(x_raw, y_raw,
                                        window_length=args.sg_window, polyorder=args.sg_poly)
                 df = df.copy()
                 df["sx"] = sx
@@ -2228,7 +2184,6 @@ def main() -> None:
             feats = extract_all_features(
                 df, fps=args.fps, xcol=xcol, ycol=ycol, fcol=fcol,
                 xcol_raw="x", ycol_raw="y",
-                use_tracker_features=args.use_tracker_features,
                 filename=fname,
             )
             feats["label"] = y_bin
@@ -2259,7 +2214,6 @@ def main() -> None:
         xcol=args.xcol,
         ycol=args.ycol,
         fcol=args.fcol,
-        use_tracker_features=args.use_tracker_features,
         sg_window=args.sg_window,
         sg_poly=args.sg_poly,
     )

@@ -16,9 +16,8 @@ Public API
   ALL_FEATURES  : list[str]          — all 125 features in canonical order
   DOMAIN_GROUPS : dict[str, list]    — 6 biological domains
   FEATURE_GROUPS: dict[str, list]    — fine-grained biological subgroups (LOO ablation)
-  DOMAIN_TO_FEATURES: dict[str, list] — alias: same as DOMAIN_GROUPS
 
-  load_data(features_csv, splits_csv, audit_csv=None) -> (df, feature_cols, domain_groups)
+  load_data(features_csv, splits_csv) -> (df, feature_cols, domain_groups)
   get_fold_split(df, fold, feature_cols)    -> (X_tv, y_tv, X_val, y_val)
   get_test_split(df, feature_cols)          -> (X_tr, y_tr, X_te, y_te)
   get_cross_farm_split(df, train_farm, feature_cols) -> (X_tr, y_tr, X_te, y_te)
@@ -211,9 +210,6 @@ FEATURE_GROUPS: dict[str, list[str]] = {
     "d6_takeoff":        _DOMAIN6_TAKEOFF,
 }
 
-# Alias for consumers that need the domain-to-feature mapping explicitly.
-DOMAIN_TO_FEATURES = DOMAIN_GROUPS
-
 # Canonical ordered list of all 125 motion-derived model features.
 # time_of_day_bucket is contextual metadata and intentionally excluded.
 # Note: radius_of_gyration removed (orphan name — feat_spatial outputs radius_gyration).
@@ -241,7 +237,6 @@ assert len(ALL_FEATURES) == len(set(ALL_FEATURES)), (
 def load_data(
     features_csv: "Path | str",
     splits_csv:   "Path | str",
-    audit_csv:    "Path | str | None" = None,
 ) -> "tuple[pd.DataFrame, list[str], dict[str, list[str]]]":
     """Load the merged feature + splits DataFrame.
 
@@ -249,7 +244,6 @@ def load_data(
     ----------
     features_csv : path to track_features.csv
     splits_csv   : path to splits_folds.csv
-    audit_csv    : optional, path to data_audit_report.csv (filters bad tracks)
 
     Returns
     -------
@@ -301,17 +295,6 @@ def load_data(
             df["cross_farm_role"] = df["farm_id"].apply(_map_farm)
         else:
             df["cross_farm_role"] = "UNKNOWN"
-
-    # Filter bad tracks if audit provided
-    if audit_csv is not None:
-        audit_path = Path(audit_csv)
-        if audit_path.exists():
-            audit = pd.read_csv(audit_path)
-            if "any_flag" in audit.columns and "filename" in audit.columns:
-                bad = set(audit.loc[audit["any_flag"], "filename"])
-                before = len(df)
-                df = df[~df["filename"].isin(bad)].copy()
-                print(f"  Audit filter: removed {before - len(df)} flagged tracks")
 
     # Identify feature columns actually present in data
     feature_cols = [f for f in ALL_FEATURES if f in df.columns]

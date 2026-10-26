@@ -60,8 +60,6 @@ RED  = "#B2182B"
 AXIS_LABEL_SIZE = 14
 TICK_LABEL_SIZE = 12
 LEGEND_SIZE = AXIS_LABEL_SIZE
-TITLE_SIZE      = 14
-ANNOTATION_SIZE = 11
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Spaghetti plot for a recording session.")
@@ -161,13 +159,6 @@ ni_tracks  = [(sx, sy) for fn in ni_fns
               for sx, sy in [load_smooth(fn)] if sx is not None]
 
 print(f"  Loaded         : {len(ins_tracks)} insect, {len(ni_tracks)} non-insect tracks")
-
-# ── canvas extent (1st–99th percentile, both classes combined) ────────────────
-all_x = np.concatenate([sx for sx, _ in ins_tracks + ni_tracks])
-all_y = np.concatenate([sy for _, sy in ins_tracks + ni_tracks])
-xmin, xmax = np.nanpercentile(all_x, 1), np.nanpercentile(all_x, 99)
-ymin, ymax = np.nanpercentile(all_y, 1), np.nanpercentile(all_y, 99)
-pad = 0.04 * max(xmax - xmin, ymax - ymin)
 
 # ── figure ────────────────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(9, 7))

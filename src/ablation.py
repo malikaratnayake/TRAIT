@@ -7,8 +7,6 @@ Studies
 -------
   Phase 3a  Cumulative domain ablation
               Domain 1 → Domain 1-2 → Domain 1-3 → Domain 1-4 → Domain 1-5 → Domain 1-6
-  Phase 3b  Leave-one-domain-out ablation
-              Full model → exclude Domain 1 → ... → exclude Domain 6
   Phase 3c  Single-domain-only ablation
               Domain 1 only → Domain 2 only → ... → Domain 6 only
   Phase 3d  Leave-one-feature-group-out (LOO) ablation
@@ -22,7 +20,6 @@ on the held-out station-disjoint test set (fold 4).
 Public API
 ----------
   run_cumulative_domain_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
-  run_leave_one_domain_out_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
   run_single_domain_only_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
   run_group_loo_ablation(df, feature_cols, xgb_params, out_dir)
   run_feature_importance(df, feature_cols, xgb_params, out_dir)
@@ -241,98 +238,6 @@ def run_cumulative_domain_ablation(
         delta = row["f1"] - prev_f1
         print(f"    +{row['domain']:7s}  ΔF1={delta:+.4f}")
 
-    print(f"\n  Saved → {out_path.name}")
-    return result_df
-
-
-# ---------------------------------------------------------------------------
-# Phase 3b — Leave-one-domain-out ablation
-# ---------------------------------------------------------------------------
-
-def run_leave_one_domain_out_ablation(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    domain_groups: dict[str, list[str]],
-    xgb_params: dict,
-    out_dir: Path,
-) -> pd.DataFrame:
-    """Train on all features except one full domain per round."""
-    print("\n── Phase 3b  Leave-one-domain-out ablation ────────────────────")
-
-    domain_names = ["Domain1", "Domain2", "Domain3", "Domain4", "Domain5", "Domain6"]
-    m_base, ci_base, _ = _eval_subset(df, feature_cols, feature_cols, xgb_params)
-    base_f1 = m_base["f1"]
-    base_pr_auc = m_base.get("pr_auc")
-    rows = [{
-        "excluded_domain": "NONE",
-        "excluded_n_features": 0,
-        "n_features": len(feature_cols),
-        "f1": base_f1,
-        "f1_lo": ci_base["f1"]["lo"],
-        "f1_hi": ci_base["f1"]["hi"],
-        "precision": m_base["precision"],
-        "recall": m_base["recall"],
-        "pr_auc": base_pr_auc,
-        "roc_auc": m_base.get("roc_auc"),
-        "mcc": m_base.get("mcc"),
-        "tp": m_base["tp"],
-        "fp": m_base["fp"],
-        "tn": m_base["tn"],
-        "fn": m_base["fn"],
-        "n_total": m_base["n_total"],
-        "n_positive": m_base["n_positive"],
-        "threshold": m_base.get("threshold"),
-        "threshold_mode": m_base.get("threshold_mode"),
-        "f1_drop": 0.0,
-        "pr_auc_drop": 0.0,
-        "roc_auc_drop": 0.0,
-    }]
-
-    print(f"  {'Excluded':<12} {'Kept':>5} {'F1':>8} {'ΔF1':>8} {'PR-AUC':>8} {'ΔPR-AUC':>9}")
-    print(f"  {'NONE':<12} {len(feature_cols):>5} {base_f1:>8.4f} {0.0:>+8.4f} "
-          f"{base_pr_auc:>8.4f} {0.0:>+9.4f}")
-
-    for domain in domain_names:
-        excluded = {f for f in domain_groups.get(domain, []) if f in feature_cols}
-        keep_cols = [f for f in feature_cols if f not in excluded]
-        if not excluded:
-            continue
-
-        m, ci, _ = _eval_subset(df, keep_cols, feature_cols, xgb_params)
-        f1_drop = base_f1 - m["f1"]
-        pr_auc_drop = base_pr_auc - m["pr_auc"]
-        roc_auc_drop = m_base["roc_auc"] - m["roc_auc"]
-        print(f"  {domain:<12} {len(keep_cols):>5} {m['f1']:>8.4f} {f1_drop:>+8.4f} "
-              f"{m['pr_auc']:>8.4f} {pr_auc_drop:>+9.4f}")
-        rows.append({
-            "excluded_domain": domain,
-            "excluded_n_features": len(excluded),
-            "n_features": len(keep_cols),
-            "f1": m["f1"],
-            "f1_lo": ci["f1"]["lo"],
-            "f1_hi": ci["f1"]["hi"],
-            "precision": m["precision"],
-            "recall": m["recall"],
-            "pr_auc": m["pr_auc"],
-            "roc_auc": m["roc_auc"],
-            "mcc": m.get("mcc"),
-            "tp": m["tp"],
-            "fp": m["fp"],
-            "tn": m["tn"],
-            "fn": m["fn"],
-            "n_total": m["n_total"],
-            "n_positive": m["n_positive"],
-            "threshold": m.get("threshold"),
-            "threshold_mode": m.get("threshold_mode"),
-            "f1_drop": f1_drop,
-            "pr_auc_drop": pr_auc_drop,
-            "roc_auc_drop": roc_auc_drop,
-        })
-
-    result_df = pd.DataFrame(rows)
-    out_path = out_dir / "ablation" / "domain_leave_one_out_results.csv"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    result_df.to_csv(out_path, index=False)
     print(f"\n  Saved → {out_path.name}")
     return result_df
 
@@ -685,9 +590,6 @@ def run_ablation(
 ) -> dict:
     """Run all Phase 3 ablation studies and return combined results dict."""
     domain_df = run_cumulative_domain_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
-    domain_loo_df = run_leave_one_domain_out_ablation(
-        df, feature_cols, domain_groups, xgb_params, out_dir
-    )
     domain_only_df = run_single_domain_only_ablation(
         df, feature_cols, domain_groups, xgb_params, out_dir
     )
@@ -696,7 +598,6 @@ def run_ablation(
 
     return {
         "domain_ablation": domain_df,
-        "domain_loo_ablation": domain_loo_df,
         "domain_only_ablation": domain_only_df,
         "loo_ablation": loo_df,
         "feature_importance": imp_df,
@@ -711,7 +612,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Phase 3 — Feature-domain ablation studies")
     p.add_argument("--features-csv",    default="data/track_features.csv")
     p.add_argument("--splits-csv",      default="data/splits_folds.csv")
-    p.add_argument("--audit-csv",       default=None)
     p.add_argument("--output-dir",      default="data/results/six_domain_v1")
     p.add_argument("--full-threshold",  type=float, default=None,
                    help="Decision threshold for the full-feature row (defaults to the "
@@ -720,8 +620,6 @@ def parse_args():
                    help="JSON string of XGBoost params, e.g. '{\"max_depth\":5}'")
     p.add_argument("--n-jobs", type=int, default=int(os.environ.get("TRAIT_N_JOBS", "-1")),
                    help="Parallel jobs for XGBoost. Use 1 for final reproducible runs.")
-    p.add_argument("--leave-one-domain-out-only", action="store_true",
-                   help="Run only full-domain leave-one-out ablation")
     p.add_argument("--single-domain-only", action="store_true",
                    help="Run only single-domain classification ablation")
     return p.parse_args()
@@ -733,9 +631,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading data …")
-    df, feature_cols, domain_groups = load_data(
-        args.features_csv, args.splits_csv, args.audit_csv
-    )
+    df, feature_cols, domain_groups = load_data(args.features_csv, args.splits_csv)
     print(f"  {len(df):,} tracks · {len(feature_cols)} features")
 
     if args.xgb_params:
@@ -767,11 +663,7 @@ def main():
     else:
         print("  No main threshold found — full-feature row will use its own OOF threshold")
 
-    if args.leave_one_domain_out_only:
-        run_leave_one_domain_out_ablation(
-            df, feature_cols, domain_groups, xgb_params, out_dir
-        )
-    elif args.single_domain_only:
+    if args.single_domain_only:
         run_single_domain_only_ablation(
             df, feature_cols, domain_groups, xgb_params, out_dir
         )
