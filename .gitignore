@@ -1,7 +1,6 @@
-# Keep the repository to source + setup files only.
-# Commit code, README/docs, requirements, and run scripts.
-# Do not commit raw datasets, generated results, local environments,
-# assistant state, or review/export bundles.
+# Keep the repository to source and setup files: code, README, requirements
+# and run scripts. The dataset, generated results, local environments and
+# exported archives are not committed.
 
 # Local Python environments
 trait-env/
@@ -44,7 +43,6 @@ results/
 **/results/
 logs/
 **/logs/
-catboost_info/
 ckpts/
 feat_ckpts/
 feature_ckpts/
@@ -54,8 +52,7 @@ split_statistics.csv
 pipeline.cfg
 pipeline_*.log
 
-# Review/result bundles and exported archives
-M*_R*/
+# Exported archives
 *.zip
 *.tar
 *.tar.gz
@@ -71,9 +68,7 @@ M*_R*/
 *.ckpt
 *.onnx
 
-# Local assistant/tooling state
-.claude/
-.codex/
+# Local caches
 .tmp/
 .cache/
 
@@ -83,8 +78,7 @@ Thumbs.db
 .vscode/
 .idea/
 
-
-#Deployment files
+# Local deployment files (not part of this repository)
 deployment/
 
 # Manuscript sources (not distributed with the code)
