@@ -1,4 +1,8 @@
-"""Portable matplotlib cache setup for batch and headless environments."""
+"""Point matplotlib and fontconfig caches at a writable directory.
+
+Needed on clusters and other headless or read-only environments where the
+default cache location under the home directory cannot be written.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from pathlib import Path
 
 
 def _is_writable_dir(path: Path) -> bool:
+    """True if path exists (or can be created) and a file can be written in it."""
     try:
         path.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=path):
@@ -18,6 +23,7 @@ def _is_writable_dir(path: Path) -> bool:
 
 
 def _pick_cache_root() -> Path:
+    """First writable directory among TRAIT_CACHE_DIR, the temp-dir variables and ./.cache."""
     candidates = [
         os.environ.get("TRAIT_CACHE_DIR"),
         os.environ.get("TMPDIR"),
@@ -36,6 +42,7 @@ def _pick_cache_root() -> Path:
 
 
 def _set_writable_env_dir(env_name: str, default_path: Path) -> None:
+    """Set env_name to default_path unless it already points at a writable directory."""
     current = os.environ.get(env_name)
     if current and _is_writable_dir(Path(current).expanduser()):
         return

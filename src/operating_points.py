@@ -60,6 +60,7 @@ def operating_points(y_true: np.ndarray, score: np.ndarray, thresholds: list[flo
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options."""
     p = argparse.ArgumentParser(description="XGBoost operating points on the held-out test set")
     p.add_argument("--results-dir", default="data/results/trait_results",
                    help="Pipeline results directory containing prauc_protocol/xgboost_prauc/")
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Compute the operating points from the saved XGBoost predictions and write the CSV."""
     args = parse_args()
     model_dir = Path(args.results_dir).expanduser().resolve() / "prauc_protocol" / "xgboost_prauc"
     preds = pd.read_csv(model_dir / "predictions.csv")

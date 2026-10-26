@@ -1,15 +1,23 @@
 """
-Plot Phase 3 precision-recall curves from saved curve CSV files.
+src/figures/plot_pr_curves.py
+=============================
+Phase 3 — Precision–recall curves of all models on the test set (Figure 4).
 
-Inputs are the per-model `*_pr_curve.csv` files written by:
-  - src/models/majority_baseline.py
-  - src/train_rocket.py
-  - src/train_fcn.py
-  - src/train_convtran.py
+Collects the per-model *_pr_curve.csv files under --results-dir (written by
+src/models/majority_baseline.py, src/models/tabular_models.py,
+src/train_fcn.py, src/train_rocket.py and src/train_convtran.py) and plots
+them in a fixed order, with each model's PR-AUC in the legend.
 
-Outputs:
-  - phase3_precision_recall_curves.csv
-  - phase3_precision_recall_curves.png
+Outputs
+-------
+  phase3_precision_recall_curves.csv  — all curve points, one model per block
+  phase3_precision_recall_curves.png  — the figure
+
+Usage
+-----
+  python src/figures/plot_pr_curves.py \\
+      --results-dir data/results/trait_results \\
+      --output-png  data/results/trait_results/figures/phase3_precision_recall_curves.png
 """
 
 from __future__ import annotations
@@ -30,7 +38,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-DEFAULT_RESULTS = Path("data/results/six_domain_v1")
+DEFAULT_RESULTS = Path("data/results/trait_results")
 AXIS_LABEL_SIZE = 14
 TICK_LABEL_SIZE = 12
 LEGEND_SIZE = 11
@@ -56,7 +64,8 @@ PLOT_ORDER = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot Phase 3 precision-recall curves")
+    """Parse command-line options."""
+    parser = argparse.ArgumentParser(description="Plot Phase 3 precision-recall curves (Figure 4)")
     parser.add_argument("--results-dir", default=str(DEFAULT_RESULTS))
     parser.add_argument("--output-png", default=None)
     parser.add_argument("--output-csv", default=None)
@@ -64,9 +73,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_curves(results_dir: Path) -> pd.DataFrame:
+    """Read every *_pr_curve.csv under results_dir and keep the models in PLOT_ORDER."""
     files = sorted(
         p for p in results_dir.rglob("*_pr_curve.csv")
-        if p.name != "phase2_precision_recall_curves.csv"
+        if p.name != "phase3_precision_recall_curves.csv"
     )
     if not files:
         raise SystemExit(f"No *_pr_curve.csv files found under {results_dir}")
@@ -88,7 +98,7 @@ def load_curves(results_dir: Path) -> pd.DataFrame:
     curves = curves[curves["model"].isin(PLOT_ORDER)].copy()
     if curves.empty:
         raise SystemExit(
-            "No requested Phase 2 model curves found. Expected: "
+            "No requested Phase 3 model curves found. Expected: "
             + ", ".join(PLOT_ORDER)
         )
     curves["model"] = pd.Categorical(curves["model"], categories=PLOT_ORDER, ordered=True)
@@ -96,6 +106,7 @@ def load_curves(results_dir: Path) -> pd.DataFrame:
 
 
 def plot_curves(curves: pd.DataFrame, output_png: Path) -> None:
+    """Plot the curves in PLOT_ORDER and save the figure."""
     fig, ax = plt.subplots(figsize=(7.2, 5.2), dpi=180)
 
     for model in PLOT_ORDER:
@@ -122,12 +133,13 @@ def plot_curves(curves: pd.DataFrame, output_png: Path) -> None:
 
 
 def main() -> None:
+    """Combine the curve files, then write the combined CSV and the figure."""
     args = parse_args()
     results_dir = Path(args.results_dir).expanduser().resolve()
     output_csv = Path(args.output_csv).expanduser().resolve() if args.output_csv else \
-        results_dir / "phase2_precision_recall_curves.csv"
+        results_dir / "phase3_precision_recall_curves.csv"
     output_png = Path(args.output_png).expanduser().resolve() if args.output_png else \
-        results_dir / "phase2_precision_recall_curve.png"
+        results_dir / "figures" / "phase3_precision_recall_curves.png"
 
     curves = load_curves(results_dir)
     output_csv.parent.mkdir(parents=True, exist_ok=True)

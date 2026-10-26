@@ -1,8 +1,20 @@
 """
-Plot top positive and negative leave-one-group-out ablation effects.
+src/figures/plot_group_loo.py
+=============================
+Phase 5 — Bar chart of the leave-one-subgroup-out ablation (Supp. Figure 1).
 
-Positive metric drop means the removed group was useful. Negative metric drop
-means the model improved when the group was removed.
+Reads group_loo_ablation.csv from src/ablation.py and plots the change in
+test PR-AUC (or F1) when each subgroup is removed, for the 10 largest and 10
+smallest contributors, coloured by domain. A positive change means removing
+the subgroup hurt the model; a negative change means the model did slightly
+better without it. Subgroup names follow paper Table 2.
+
+Usage
+-----
+  python src/figures/plot_group_loo.py \\
+      --input-csv  data/results/trait_results/ablation/group_loo_ablation.csv \\
+      --output-png data/results/trait_results/figures/group_loo_prauc_top_positive_negative.png \\
+      --metric pr_auc
 """
 
 from __future__ import annotations
@@ -23,7 +35,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-DEFAULT_INPUT = Path("data/results/six_domain_v1/ablation/group_loo_ablation.csv")
+DEFAULT_INPUT = Path("data/results/trait_results/ablation/group_loo_ablation.csv")
 AXIS_LABEL_SIZE = 18
 TICK_LABEL_SIZE = 16
 LEGEND_SIZE = 15
@@ -74,6 +86,7 @@ GROUP_LABELS = {
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options."""
     parser = argparse.ArgumentParser(description="Plot leave-one-group-out ablation effects")
     parser.add_argument("--input-csv", default=str(DEFAULT_INPUT))
     parser.add_argument("--output-png", default=None)
@@ -89,6 +102,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def prettify_group(name: str) -> str:
+    """Display name for a subgroup key such as 'd3_residual'."""
     if name in GROUP_LABELS:
         return GROUP_LABELS[name]
     parts = name.split("_")
@@ -98,6 +112,7 @@ def prettify_group(name: str) -> str:
 
 
 def metric_drop_column(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str, str]:
+    """Return the data with a drop column for the chosen metric, its name and the axis label."""
     df = df.copy()
     if metric == "f1":
         if "f1_drop" not in df.columns:
@@ -116,6 +131,7 @@ def metric_drop_column(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str
 
 
 def select_groups(df: pd.DataFrame, top_n: int, metric: str) -> tuple[pd.DataFrame, str, str]:
+    """Select the subgroups to plot: the top_n largest and smallest contributions."""
     df, drop_col, axis_label = metric_drop_column(df, metric)
     if "group" not in df.columns:
         raise SystemExit("Input CSV must contain a group column")
@@ -146,6 +162,7 @@ def select_groups(df: pd.DataFrame, top_n: int, metric: str) -> tuple[pd.DataFra
 
 
 def section_split(selected: pd.DataFrame) -> tuple[int, float] | None:
+    """Index and y position of the divider between the two groups of bars, if any."""
     effects = selected["effect"].tolist() if "effect" in selected.columns else []
     split_points = [
         idx for idx in range(1, len(effects))
@@ -158,6 +175,7 @@ def section_split(selected: pd.DataFrame) -> tuple[int, float] | None:
 
 
 def add_section_divider(ax: plt.Axes, selected: pd.DataFrame, show_labels: bool = False) -> None:
+    """Draw a dashed line between the highest and least contributors, optionally labelled."""
     split = section_split(selected)
     if split is None:
         return
@@ -190,6 +208,7 @@ def add_section_divider(ax: plt.Axes, selected: pd.DataFrame, show_labels: bool 
 
 
 def add_domain_legend(ax: plt.Axes, selected: pd.DataFrame) -> None:
+    """Add a legend of the domain colours present in the plot."""
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=color, label=domain)
         for domain, color in DOMAIN_COLORS.items()
@@ -199,6 +218,7 @@ def add_domain_legend(ax: plt.Axes, selected: pd.DataFrame) -> None:
 
 
 def plot(selected: pd.DataFrame, output_png: Path, drop_col: str, axis_label: str) -> None:
+    """Draw the horizontal bar chart and save it to output_png."""
     height = max(6.0, 0.46 * len(selected) + 1.8)
     fig, ax = plt.subplots(figsize=(8.2, height), dpi=180)
 
@@ -246,6 +266,7 @@ def plot(selected: pd.DataFrame, output_png: Path, drop_col: str, axis_label: st
 
 
 def main() -> None:
+    """Read the ablation results, select subgroups, and write the CSV and figure."""
     args = parse_args()
     input_csv = Path(args.input_csv).expanduser().resolve()
     output_png = Path(args.output_png).expanduser().resolve() if args.output_png else \

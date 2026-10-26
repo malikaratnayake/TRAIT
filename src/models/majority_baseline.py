@@ -108,6 +108,7 @@ def run_majority_baseline(df, feature_cols, out_dir):
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    """Parse command-line options."""
     p = argparse.ArgumentParser(description="Phase 3 — Majority-class baseline")
     p.add_argument("--features-csv", default="data/results/trait_results/track_features.csv")
     p.add_argument("--splits-csv",   default="data/splits_folds.csv")
@@ -116,6 +117,7 @@ def parse_args():
 
 
 def main():
+    """Load the data and run the majority baseline."""
     args = parse_args()
     features_csv = Path(args.features_csv).expanduser().resolve()
     splits_csv   = Path(args.splits_csv).expanduser().resolve()

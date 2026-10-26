@@ -1,4 +1,10 @@
-"""Shared track smoothing helpers for trajectory figures."""
+"""Savitzky–Golay smoothing used by the trajectory figures (Figures 2 and 3).
+
+The pipeline itself smooths with src/utils/smoothing.smooth_coords. This
+NumPy-only version gives identical values inside a track but leaves the first
+and last half-window of points unsmoothed; it is kept so the figures
+regenerate exactly as published.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ import numpy as np
 
 
 def _sg_coeffs(w: int, poly: int = 2) -> np.ndarray:
+    """Savitzky–Golay smoothing coefficients for an odd window w and polynomial order poly."""
     half = w // 2
     pos = np.arange(-half, half + 1, dtype=float)
     A = np.column_stack([pos ** i for i in range(poly + 1)])

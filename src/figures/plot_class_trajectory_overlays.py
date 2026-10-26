@@ -1,18 +1,25 @@
 """
-Class-conditional trajectory overlays (side by side, shared y axis).
+src/figures/plot_class_trajectory_overlays.py
+=============================================
+Phase 5 — Class-conditional trajectory overlays (Figure 3).
 
-Left panel  : Non-insect trajectories (orange)
-Right panel : Insect trajectories (blue)
+Draws 200 randomly sampled tracks per class (seed 0) side by side: non-insect
+tracks on the left in orange, insect tracks on the right in blue. Every track
+is smoothed and translated so it starts at the origin; its colour fades from
+light (early frames) to dark (late frames), and end positions are shown as
+dots. Both panels share one axis range (the 92nd percentile of all absolute
+coordinates), with y increasing downwards as in the camera image.
 
-All tracks translated to start at origin (0, 0).
-Path colour fades from light (early frames) → dark (late frames).
-End positions shown as a scatter cloud.
+Smoothing uses src/figures/_track_utils.sg_smooth, which leaves the first and
+last few points of a track unsmoothed; this reproduces the published figure.
 
 Usage
 -----
 Run from the TRAIT project root:
 
-    python src/figures/plot_class_trajectory_overlays.py
+    python src/figures/plot_class_trajectory_overlays.py \\
+        --splits-csv data/splits_folds.csv \\
+        --output-dir data/results/trait_results/figures
 
 Outputs
 -------
@@ -45,39 +52,32 @@ import matplotlib.colors as mcolors
 ROOT   = Path(__file__).resolve().parents[2]   # …/TRAIT
 DEFAULT_TRACKS = ROOT / "data" / "tracks"
 DEFAULT_SPLITS = ROOT / "data" / "splits_folds.csv"
-DEFAULT_OUT = ROOT / "data" / "results"
+DEFAULT_OUT = ROOT / "data" / "results" / "trait_results" / "figures"
 
 BLUE   = "#2166AC"
 ORANGE = "#D6604D"
 AXIS_LABEL_SIZE = 14
 TICK_LABEL_SIZE = 12
 LEGEND_SIZE = AXIS_LABEL_SIZE
+N_OVERLAY = 200
 
 
-parser = argparse.ArgumentParser(description="Plot class-conditional trajectory overlays.")
-parser.add_argument("--tracks-dir", default=str(DEFAULT_TRACKS),
-                    help="Directory containing per-track CSVs.")
-parser.add_argument("--splits-csv", default=str(DEFAULT_SPLITS),
-                    help="Splits CSV containing filename and label columns.")
-parser.add_argument("--output-dir", default=str(DEFAULT_OUT),
-                    help="Directory where figure files will be written.")
-args = parser.parse_args()
-
-TRACKS = Path(args.tracks_dir).expanduser().resolve()
-SPLITS = Path(args.splits_csv).expanduser().resolve()
-OUT = Path(args.output_dir).expanduser().resolve()
-OUT.mkdir(parents=True, exist_ok=True)
-
-if not TRACKS.exists():
-    raise SystemExit(f"Tracks directory not found: {TRACKS}")
-if not SPLITS.exists():
-    raise SystemExit(f"Splits CSV not found: {SPLITS}")
+def parse_args() -> argparse.Namespace:
+    """Parse command-line options."""
+    parser = argparse.ArgumentParser(description="Plot class-conditional trajectory overlays (Figure 3).")
+    parser.add_argument("--tracks-dir", default=str(DEFAULT_TRACKS),
+                        help="Directory containing per-track CSVs.")
+    parser.add_argument("--splits-csv", default=str(DEFAULT_SPLITS),
+                        help="Splits CSV containing filename and label columns.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUT),
+                        help="Directory where figure files will be written.")
+    return parser.parse_args()
 
 
 # ── data helpers ──────────────────────────────────────────────────────────────
-def load_track(fname: str):
+def load_track(tracks_dir: Path, fname: str):
     """Load a track CSV; return DataFrame or None if too short."""
-    path = TRACKS / fname
+    path = tracks_dir / fname
     if not path.exists():
         return None
     try:
@@ -96,11 +96,11 @@ def align_track(df: pd.DataFrame):
     return sx, sy
 
 
-def collect_tracks(fns: list, n_want: int) -> list:
+def collect_tracks(tracks_dir: Path, fns: list, n_want: int) -> list:
     """Load and align up to *n_want* tracks from *fns*."""
     tracks = []
     for fn in fns:
-        df = load_track(fn)
+        df = load_track(tracks_dir, fn)
         if df is None:
             continue
         tracks.append(align_track(df))
@@ -109,34 +109,9 @@ def collect_tracks(fns: list, n_want: int) -> list:
     return tracks
 
 
-# ── load splits and collect tracks ────────────────────────────────────────────
-splits   = pd.read_csv(SPLITS)
-all_lbl  = splits[["filename", "label"]].copy()
-
-np.random.seed(0)
-N_OVERLAY = 200
-
-ins_fns = all_lbl[all_lbl["label"] == "insect"]["filename"].tolist()
-ni_fns  = all_lbl[all_lbl["label"] == "not_insect"]["filename"].tolist()
-np.random.shuffle(ins_fns)
-np.random.shuffle(ni_fns)
-
-ins_tracks = collect_tracks(ins_fns, N_OVERLAY)
-ni_tracks  = collect_tracks(ni_fns,  N_OVERLAY)
-print(f"Loaded {len(ins_tracks)} insect, {len(ni_tracks)} non-insect tracks")
-
-# ── shared axis limits (92nd-percentile of combined absolute extent) ──────────
-all_coords = np.abs(
-    np.concatenate(
-        [t[0] for t in ins_tracks + ni_tracks]
-        + [t[1] for t in ins_tracks + ni_tracks]
-    )
-)
-lim = float(np.percentile(all_coords, 92))
-
-
 # ── panel drawing function ────────────────────────────────────────────────────
-def draw_panel(ax, tracks: list, base_col: str) -> None:
+def draw_panel(ax, tracks: list, base_col: str, lim: float) -> None:
+    """Draw one class's tracks, end points and origin marker on ax, within ±lim pixels."""
     cmap  = mcolors.LinearSegmentedColormap.from_list(
         "tc", ["#EEEEEE", base_col]
     )
@@ -171,39 +146,78 @@ def draw_panel(ax, tracks: list, base_col: str) -> None:
     ax.grid(True, alpha=0.25, linewidth=0.6)
 
 
-# ── figure ────────────────────────────────────────────────────────────────────
-fig, (ax_ni, ax_ins) = plt.subplots(
-    1, 2, figsize=(12, 6.5), sharex=True, sharey=True
-)
-fig.subplots_adjust(wspace=0.05, bottom=0.2)
+def main() -> None:
+    """Sample tracks per class and save the overlay figure as PDF and PNG."""
+    args = parse_args()
+    tracks_dir = Path(args.tracks_dir).expanduser().resolve()
+    splits_csv = Path(args.splits_csv).expanduser().resolve()
+    out_dir = Path(args.output_dir).expanduser().resolve()
+    if not tracks_dir.exists():
+        raise SystemExit(f"Tracks directory not found: {tracks_dir}")
+    if not splits_csv.exists():
+        raise SystemExit(f"Splits CSV not found: {splits_csv}")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-draw_panel(ax_ni,  ni_tracks,  ORANGE)
-draw_panel(ax_ins, ins_tracks, BLUE)
+    # ── load splits and collect tracks ────────────────────────────────────────
+    splits   = pd.read_csv(splits_csv)
+    all_lbl  = splits[["filename", "label"]].copy()
 
-ax_ni.set_ylabel("y (pixels)", fontsize=AXIS_LABEL_SIZE)   # shared y title
-ax_ins.tick_params(axis="y", labelleft=False)                 # shared y ticks
+    np.random.seed(0)
+    ins_fns = all_lbl[all_lbl["label"] == "insect"]["filename"].tolist()
+    ni_fns  = all_lbl[all_lbl["label"] == "not_insect"]["filename"].tolist()
+    np.random.shuffle(ins_fns)
+    np.random.shuffle(ni_fns)
 
-legend_handles = [
-    plt.Line2D([0], [0], color=ORANGE, linewidth=2.2, label="Non-insect track"),
-    plt.Line2D([0], [0], color=BLUE, linewidth=2.2, label="Insect track"),
-    plt.Line2D([0], [0], marker="o", color="black", ms=6,
-               linestyle="none", label="Start (all tracks)"),
-    plt.Line2D([0], [0], marker="o", color="0.35", ms=6,
-               linestyle="none", alpha=0.7, label="End"),
-]
-fig.legend(
-    handles=legend_handles,
-    loc="lower center",
-    ncol=4,
-    frameon=False,
-    fontsize=LEGEND_SIZE,
-    bbox_to_anchor=(0.5, 0.04),
-)
+    ins_tracks = collect_tracks(tracks_dir, ins_fns, N_OVERLAY)
+    ni_tracks  = collect_tracks(tracks_dir, ni_fns,  N_OVERLAY)
+    print(f"Loaded {len(ins_tracks)} insect, {len(ni_tracks)} non-insect tracks")
 
-for ext in ("pdf", "png"):
-    out_path = OUT / f"class_trajectory_overlays.{ext}"
-    fig.savefig(out_path, bbox_inches="tight", dpi=180)
-    print(f"  Saved → {out_path}")
+    # ── shared axis limits (92nd-percentile of combined absolute extent) ──────
+    all_coords = np.abs(
+        np.concatenate(
+            [t[0] for t in ins_tracks + ni_tracks]
+            + [t[1] for t in ins_tracks + ni_tracks]
+        )
+    )
+    lim = float(np.percentile(all_coords, 92))
 
-plt.close(fig)
-print("Done.")
+    # ── figure ────────────────────────────────────────────────────────────────
+    fig, (ax_ni, ax_ins) = plt.subplots(
+        1, 2, figsize=(12, 6.5), sharex=True, sharey=True
+    )
+    fig.subplots_adjust(wspace=0.05, bottom=0.2)
+
+    draw_panel(ax_ni,  ni_tracks,  ORANGE, lim)
+    draw_panel(ax_ins, ins_tracks, BLUE, lim)
+
+    ax_ni.set_ylabel("y (pixels)", fontsize=AXIS_LABEL_SIZE)   # shared y title
+    ax_ins.tick_params(axis="y", labelleft=False)                 # shared y ticks
+
+    legend_handles = [
+        plt.Line2D([0], [0], color=ORANGE, linewidth=2.2, label="Non-insect track"),
+        plt.Line2D([0], [0], color=BLUE, linewidth=2.2, label="Insect track"),
+        plt.Line2D([0], [0], marker="o", color="black", ms=6,
+                   linestyle="none", label="Start (all tracks)"),
+        plt.Line2D([0], [0], marker="o", color="0.35", ms=6,
+                   linestyle="none", alpha=0.7, label="End"),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=4,
+        frameon=False,
+        fontsize=LEGEND_SIZE,
+        bbox_to_anchor=(0.5, 0.04),
+    )
+
+    for ext in ("pdf", "png"):
+        out_path = out_dir / f"class_trajectory_overlays.{ext}"
+        fig.savefig(out_path, bbox_inches="tight", dpi=180)
+        print(f"  Saved → {out_path}")
+
+    plt.close(fig)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
