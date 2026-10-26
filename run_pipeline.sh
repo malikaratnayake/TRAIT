@@ -8,8 +8,7 @@
 #
 #   Phase 1  Feature extraction  — gap filling, Savitzky–Golay smoothing
 #                                  (window 11, order 2) and the 125 motion
-#                                  features in six domains. Tracks shorter than
-#                                  5 frames are discarded.
+#                                  features in six domains.
 #   Phase 2  Splits              — station-disjoint five-fold splits
 #                                  (StratifiedGroupKFold). Fold 4 is the
 #                                  held-out test set.
@@ -364,8 +363,8 @@ export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 # PHASE 1 — Feature Generation
 # =============================================================================
 header "Phase 1 — Feature Generation  (smoothing + 125-feature extraction)"
-log "  Savitzky-Golay smoothing (window=11, poly=2) is applied to raw (x,y)"
-log "  coordinates before feature extraction. Tracks < 5 frames are discarded."
+log "  Gap filling and Savitzky-Golay smoothing (window=11, poly=2) are applied"
+log "  to the raw (x,y) coordinates before feature extraction."
 log "  Features: $FEATURE_COUNT intrinsic motion features across 6 biological domains."
 
 # 1.1 Extract six-domain motion feature set
@@ -436,10 +435,10 @@ ok "Phase 1 complete"
 # PHASE 2 — CV Splits
 # =============================================================================
 header "Phase 2 — Grouped, Leakage-Free CV Splits"
-log "  Station-disjoint 5-fold grouped split (group = farm_id + station_id)."
+log "  Station-disjoint 5-fold grouped split (group = farm + location + station)."
 log "  Fold strategy: $FOLD_STRATEGY"
 log "  Fold 4 is held out as the fixed test set (not used for model selection)."
-log "  Cross-farm roles assigned per fold: Farm A train / Farm B train splits."
+log "  Each track's farm is recorded for the Phase 4 cross-farm evaluation."
 
 split_strategy_matches() {
     [[ -f "$SPLITS_CSV" ]] || return 1
@@ -941,7 +940,8 @@ fi
 # PHASE 4 — Cross-Farm Generalisation
 # =============================================================================
 header "Phase 4 — Cross-Farm Generalisation"
-log "  XGBoost trained on ALL tracks from one farm, evaluated on the other."
+log "  XGBoost within each farm (folds 0-3 -> fold 4) and across farms (all of one"
+log "  farm -> all of the other), at the Phase 3 decision threshold."
 log "  No fine-tuning, no domain adaptation, no shared normalisation."
 log "  Feature set: $FEATURE_COUNT intrinsic motion features (no recording metadata)."
 
@@ -1039,7 +1039,8 @@ ok "Phase 4 complete"
 header "Phase 5 — Ablation Studies  (XGBoost on held-out test set)"
 log "  5a  Cumulative domain   D1 → D1+D2 → D1+D2+D3 → … → D1–D6"
 log "  5b  Single-domain-only  D1 only, D2 only, …, D6 only"
-log "  5c  Leave-one-group-out biological subgroup LOO (32 groups)"
+log "  5c  Leave-one-subgroup-out (32 subgroups)"
+log "  5d  Permutation feature importance"
 
 STEP="p5_ablation"
 if needs_run_with_deps "$STEP" 5 \
@@ -1081,7 +1082,7 @@ print(json.dumps(p))
     fi
 fi
 
-# 5.2 Leave-one-group-out ablation plot
+# 5.2 Leave-one-subgroup-out ablation plot (Supp. Figure 1)
 STEP="p5_ablation_plot"
 if needs_run_with_deps "$STEP" 5 \
     "$RESULTS/ablation/group_loo_ablation.csv" \
@@ -1104,7 +1105,7 @@ if needs_run_with_deps "$STEP" 5 \
     fi
 fi
 
-# 5.3 Trajectory figures (class overlays + best-session spaghetti)
+# 5.3 Trajectory figures (Figures 2 and 3)
 STEP="p5_trajectory_figs"
 if needs_run_with_deps "$STEP" 5 \
     "$SPLITS_CSV" \

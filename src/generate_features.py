@@ -545,7 +545,7 @@ def feat_trajectory(x: np.ndarray, y: np.ndarray) -> dict:
 
 
 def feat_multiscale_straightness(x: np.ndarray, y: np.ndarray) -> dict:
-    """Straightness computed at three temporal scales.
+    """Straightness computed at two temporal scales (short and long windows).
 
     Insects are tortuous at short scales (looping near a flower) but
     directed at coarse scales (travelling between patches).  Plant motion

@@ -1,4 +1,4 @@
-# TRAIT — full dependency set (single environment)
+# TRAIT — dependencies (single environment)
 # Requires Python 3.10 or newer. If SciPy candidates stop at 1.13.1,
 # the active interpreter is older than this environment expects.
 # Install into the trait-env virtual environment:
@@ -7,11 +7,10 @@
 #   trait-env\Scripts\activate           # Windows
 #   python -m pip install -r requirements.txt
 #
-# This installs everything needed for Phases 1-5, including the optional
-# 1D-CNN (PyTorch) and miniROCKET (aeon) baselines in Phase 3.
+# This installs everything needed for Phases 1-5.
 
 # Numerical computing
-# Exact pins match the environment used to generate the current results.
+# Exact pins match the environment used for the results in the paper.
 numpy==1.26.4
 scipy==1.15.3
 
@@ -26,7 +25,7 @@ joblib==1.5.3
 # Plotting
 matplotlib==3.10.9
 
-# 1D-CNN baseline (Phase 3)
+# 1D-CNN and ConvTran baselines (Phase 3)
 torch==2.12.0
 
 # miniROCKET baseline (Phase 3)
