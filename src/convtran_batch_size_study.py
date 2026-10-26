@@ -1,45 +1,29 @@
 """
 src/convtran_batch_size_study.py
-===========================
-Supplementary study — ConvTran batch-size sensitivity.
+================================
+Supplementary study — ConvTran batch-size sensitivity (Supp. Table 11).
 
-Motivation
-----------
-src/train_convtran.py uses ConvTran's own published architecture defaults
-(emb_size, num_heads, dropout, lr all match the official repo), but two
-training-recipe choices deliberately deviate from the paper's defaults:
-batch_size=128 instead of the official 16, and AdamW instead of the
-official RAdam. Both were chosen for parity with this project's other
-sequence baselines (train_convtran.py shares train_fcn.py's training
-budget) rather than to reproduce ConvTran's original recipe
-exactly, since the official defaults were tuned for the much smaller
-UCR/UEA benchmark datasets typically used to evaluate it, not a ~23k-track
-training set.
+src/train_convtran.py uses ConvTran's published architecture defaults but is
+trained with batch size 128 and AdamW, the same training budget as the
+1D-CNN, rather than the published recipe (batch size 16, RAdam), which was
+tuned on much smaller UCR/UEA benchmark datasets. This script retrains
+ConvTran at several batch sizes to check that the reported result does not
+depend on that choice.
 
-This script checks whether that batch-size choice matters: it trains
-ConvTran at several batch sizes spanning the official default up to and
-beyond this project's production default, so the paper can report whether
-the main result (ConvTran underperforms XGBoost) is stable across that
-choice, rather than an artefact of one specific setting. Intended for the
-supplementary material, not the main text.
+Each batch size runs src/train_convtran.py as a separate process, writing to
+<output-dir>/convtran_batch_size_study/bs_<N>/ (with its own train.log), and
+the results are collected into one summary table. The reported ConvTran
+result in convtran_prauc/ is not changed. Batch sizes that already have
+results are skipped unless --overwrite is given, and a failed batch size does
+not stop the others. The pipeline runs this study when given
+--convtran-batch-sweep; it can also be run on its own.
 
-Isolation from the main ConvTran result
------------------------------------------
-This script does not modify src/train_convtran.py and does not touch the
-main reported ConvTran result (data/results/<run>/convtran_prauc/). It
-invokes src/train_convtran.py as a separate subprocess once per batch size,
-each writing to its own subdirectory under --output-dir, then aggregates
-the per-batch-size results.csv files into one summary table. The pipeline
-runs it when given --convtran-batch-sweep; it can also be run on its own.
+Each batch size is a full training run, and smaller batches take longer
+(batch 16 is roughly 8x slower per epoch than batch 128).
 
-Runtime note
-------------
-Each batch size is a full training run (up to --epochs epochs, early
-stopping with the same patience as train_convtran.py). Smaller batch sizes
-mean more optimiser steps per epoch and are proportionally slower — batch
-16 can take roughly 8x longer per epoch than batch 128. Budget accordingly;
-this is not a quick script to run at production settings (max_len=512, the
-full ~23k-track training set).
+Output
+------
+  <output-dir>/convtran_batch_size_study/convtran_batch_size_summary.csv
 
 Usage
 -----
@@ -47,7 +31,7 @@ Usage
       --batch-sizes 16 32 64 96 128 \\
       --output-dir data/results/trait_results
 
-  Smoke test (fast, not for reporting):
+  Quick check that it runs (not for reporting):
   python src/convtran_batch_size_study.py --batch-sizes 16 32 --limit 300 --epochs 3
 """
 
@@ -121,11 +105,12 @@ def run_one_batch_size(python_exe: str, batch_size: int, study_dir: Path, args) 
 
 
 def run_sweep(args) -> pd.DataFrame:
+    """Train ConvTran at each batch size and write convtran_batch_size_summary.csv."""
     study_dir = Path(args.output_dir).expanduser().resolve() / "convtran_batch_size_study"
     study_dir.mkdir(parents=True, exist_ok=True)
     python_exe = args.python or sys.executable
 
-    print("\n── Supplementary study  ConvTran batch-size sensitivity ──────")
+    print("\n── ConvTran batch-size sensitivity (Supp. Table 11) ──────────")
     print(f"  Batch sizes : {args.batch_sizes}")
     print(f"  max_len={args.max_len}  epochs(budget)={args.epochs}  device={args.device}")
     print(f"  Output      : {study_dir}\n")
@@ -175,18 +160,18 @@ def run_sweep(args) -> pd.DataFrame:
 
         prauc_range = ok["pr_auc"].max() - ok["pr_auc"].min()
         print(f"\n  PR-AUC range across batch sizes tested: {prauc_range:.4f}")
-        print("  (production default is batch_size=128; official ConvTran default is 16)")
+        print("  (reported ConvTran uses batch_size=128; published ConvTran recipe uses 16)")
 
     failed = summary[summary["status"] == "failed"]
     if not failed.empty:
         print(f"\n  Failed batch sizes: {list(failed['batch_size'])} — see individual train.log files")
 
     print(f"\n  Summary -> {summary_path}")
-    print("  (Supplementary output — main-text ConvTran row / convtran_prauc/ unaffected)")
     return summary
 
 
 def parse_args():
+    """Parse command-line options."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--batch-sizes", type=int, nargs="+", default=DEFAULT_BATCH_SIZES,
                    help=f"Batch sizes to sweep (default: {DEFAULT_BATCH_SIZES})")
@@ -209,9 +194,10 @@ def parse_args():
 
 
 def main():
+    """Run the batch-size sweep."""
     args = parse_args()
     run_sweep(args)
-    print("\n✓ ConvTran batch-size sensitivity study complete (supplementary)")
+    print("\n✓ ConvTran batch-size sensitivity study complete")
 
 
 if __name__ == "__main__":

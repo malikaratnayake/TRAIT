@@ -1,36 +1,36 @@
 """
 src/create_splits.py
 ====================
-Step 1.3 — Create grouped, leakage-free cross-validation splits.
+Phase 2 — Station-disjoint five-fold cross-validation splits.
 
-WHY this matters
-----------------
-The existing pipeline calls sklearn's train_test_split(stratify=y), which
-splits at the individual track level.  Tracks from the same farm / station /
-recording session therefore appear in both train and test — a form of data
-leakage that inflates reported performance and invalidates grouped evaluation.
-
-This script groups by farm_id + station_id so that every track from one
-physical camera-station lands in exactly one fold.
+Tracks recorded by the same camera station share background, lighting and
+vegetation, so a track-level split would leak station information between
+training and test data. All tracks from one station (group_key = farm +
+location + station, e.g. FarmA_L1_S10; 153 groups) are therefore assigned to
+the same fold (paper Sec. 3.1, Supp. Sec. 2).
 
 Fold design
 -----------
-  5-fold StratifiedGroupKFold by default on group_key = farm_id + '_' + station_id,
-  stratified by farm-location × class and selected by deterministic seed search.
-  Optional legacy GroupKFold is available with --fold-strategy group.
-  Fold 0–3  : standard train / val splits (used in cross-validation)
-  Fold 4    : reserved held-out TEST set (never seen during model selection)
+  StratifiedGroupKFold (5 folds) grouped on group_key and stratified by
+  farm location × class. A deterministic search over --seed-search-trials
+  shuffles, starting at --random-state, keeps the split that best balances
+  insect prevalence and farm representation across folds (the paper's split
+  is random_state = 47, found from --random-state 0 with 100 trials).
+  --fold-strategy group uses plain GroupKFold instead.
 
-  Additionally, a cross-farm split is created:
-    cross_farm_train : all Farm A tracks
-    cross_farm_test  : all Farm B tracks
-  (and the symmetric direction)
-  These are labelled in the 'cross_farm_role' column.
+  Folds 0–3 : training / validation (model selection, early stopping,
+              threshold tuning)
+  Fold 4    : held-out test set, used once for final evaluation
 
-Outputs
--------
-  data/splits_folds.csv      — one row per track, fold assignment + metadata
-  data/split_statistics.csv  — summary of each fold (counts, class balance)
+  Each track's farm is also recorded in 'cross_farm_role' for the Phase 4
+  cross-farm evaluation (train on one farm, test on the other).
+
+Outputs (in --output-dir)
+-------------------------
+  splits_folds.csv      — one row per track: fold, split role, farm,
+                          location, station and group key
+  split_statistics.csv  — tracks, class balance, locations and stations per
+                          partition (reproduces paper Table 1)
 
 Usage
 -----
@@ -78,13 +78,13 @@ def create_splits(
     print(f"Loading labels: {labels_csv}")
     labels = pd.read_csv(labels_csv)
 
-    # Drop the stray header row (artifact of incremental CSV appending)
+    # Drop any repeated header row
     labels = labels[labels["label"] != "label"].reset_index(drop=True)
 
     # Attach metadata from filenames
     labels = parse_dataframe(labels, filepath_col="filepath")
 
-    # Drop the single unparseable row (UNKNOWN farm)
+    # Drop rows whose filename cannot be parsed (farm_id 'UNKNOWN')
     unknown_mask = labels["farm_id"] == "UNKNOWN"
     if unknown_mask.any():
         print(f"  Dropping {unknown_mask.sum()} row(s) with unparseable filenames.")
@@ -102,10 +102,8 @@ def create_splits(
     y = _binary_labels(labels["label"])
 
     if fold_strategy == "stratified_group":
-        # Stratify on site-location × class jointly. The previous binary
-        # comparison against the first farm_id accidentally made the strata
-        # "first location vs everything else"; factorizing all farm_id values
-        # preserves all Farm A/B location strata.
+        # Stratify on farm location × class jointly: one stratum per
+        # (farm_id, class) pair.
         site_codes, site_levels = pd.factorize(
             labels["farm_id"].astype(str),
             sort=True,
@@ -155,7 +153,6 @@ def create_splits(
     # -----------------------------------------------------------------------
     # Cross-farm roles
     # -----------------------------------------------------------------------
-    # Farm A and Farm B are pseudonymous site labels.
     # The cross-farm test is: train on Farm A, test on Farm B (and vice versa).
     labels["cross_farm_role"] = labels["farm_name"]   # 'Farm_A' or 'Farm_B'
     labels["fold_strategy"] = fold_strategy
@@ -338,6 +335,7 @@ def _build_stats(splits_df: pd.DataFrame, n_folds: int) -> pd.DataFrame:
     binary = pd.Series(_binary_labels(splits_df["label"]), index=splits_df.index)
 
     def _stats(m: pd.Series, fold: int, label: str) -> dict:
+        """Counts for the rows selected by mask m."""
         n = int(m.sum())
         n_ins = int(binary[m].sum())
         return {
@@ -369,6 +367,7 @@ def _build_stats(splits_df: pd.DataFrame, n_folds: int) -> pd.DataFrame:
 
 
 def _print_summary(splits_df: pd.DataFrame, stats_df: pd.DataFrame, n_folds: int) -> None:
+    """Print the split statistics and the farm × fold track counts."""
     print()
     print("=" * 65)
     print("SPLIT SUMMARY")
@@ -392,8 +391,9 @@ def _print_summary(splits_df: pd.DataFrame, stats_df: pd.DataFrame, n_folds: int
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options."""
     parser = argparse.ArgumentParser(
-        description="Step 1.3 — Create grouped, leakage-free CV splits."
+        description="Phase 2 — Create station-disjoint cross-validation splits."
     )
     parser.add_argument(
         "--labels-csv", default="data/track_classification.csv",
@@ -428,6 +428,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Create the splits from the labels CSV."""
     args = parse_args()
     labels_csv = Path(args.labels_csv).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()

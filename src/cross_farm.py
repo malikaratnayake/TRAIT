@@ -1,25 +1,32 @@
 """
 src/cross_farm.py
-===========================
-Phase 5 — Cross-farm generalisation experiments.
+=================
+Phase 4 — Within-farm and cross-farm generalisation of XGBoost (Table 4).
 
-Evaluations (intrinsic-motion features only)
---------------------------------------------
-  Within Farm A  : train folds 0-3 of Farm A, test fold 4 of Farm A
-  Within Farm B  : train folds 0-3 of Farm B, test fold 4 of Farm B
-  Farm A → Farm B: train all Farm A, test all Farm B
-  Farm B → Farm A: train all Farm B, test all Farm A
+Retrains XGBoost with the hyperparameters selected in Phase 3 and scores it
+at the Phase 3 decision threshold (τ = 0.53), with no per-farm re-tuning, no
+domain adaptation and no shared normalisation:
 
-No metadata-derived feature (time-of-day, station ID, season/farm) is used as
-a model input. Farm identity defines the train/test split only — never a
-feature — so cross-farm transfer measures generalisation of intrinsic motion.
+  A→A (within) : train on Farm A folds 0–3, test on Farm A fold 4
+  B→B (within) : train on Farm B folds 0–3, test on Farm B fold 4
+  A→B (cross)  : train on all Farm A tracks, test on all Farm B tracks
+  B→A (cross)  : train on all Farm B tracks, test on all Farm A tracks
+
+Farm identity defines the train/test partitions only; it is never a model
+feature.
+
+Outputs (under <output-dir>/cross_farm/)
+----------------------------------------
+  cross_farm_results.csv   — one row per evaluation: sizes, threshold,
+                             precision, recall, F1 (with CI), PR-AUC, MCC
+  cross_farm_summary.json  — the same rows as JSON
 
 Usage
 -----
   python src/cross_farm.py \\
-      --features-csv data/track_features.csv \\
+      --features-csv data/results/trait_results/track_features.csv \\
       --splits-csv   data/splits_folds.csv \\
-      --output-dir   data/results/six_domain_v1
+      --output-dir   data/results/trait_results
 """
 
 from __future__ import annotations
@@ -67,12 +74,14 @@ def _threshold_from_xgb_result(path: Path, default: float = 0.5) -> float:
 
 
 def _pos_weight(y):
+    """Negative-to-positive class ratio, used as XGBoost's scale_pos_weight."""
     n_pos = int(y.sum())
     n_neg = int(len(y) - n_pos)
     return float(n_neg / n_pos) if n_pos > 0 else 1.0
 
 
 def _train_xgb(X_tr, y_tr, params):
+    """Fit XGBoost with the given hyperparameters and a class-balancing scale_pos_weight."""
     import xgboost as xgb
     spw = _pos_weight(y_tr)
     params = dict(params)
@@ -189,14 +198,12 @@ def run_cross_farm(
     xgb_threshold: float,
     out_dir: Path,
 ) -> pd.DataFrame:
-    """
-    Run cross-farm generalisation experiments on the standard 125-feature set.
+    """Run the four within- and cross-farm evaluations and save the results.
 
-    No metadata-derived feature (time-of-day, station ID, season/farm) is used
-    as a model input. Farm identity is used only to define the train/test
-    split, never as a feature.
+    Farm identity is used only to define the train/test split, never as a
+    feature.
     """
-    print("\n── Phase 5  Cross-farm generalisation ─────────────────────────")
+    print("\n── Phase 4  Cross-farm generalisation ─────────────────────────")
     try:
         import xgboost as xgb
     except ImportError:
@@ -238,10 +245,11 @@ def run_cross_farm(
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Phase 5 — Cross-farm generalisation")
-    p.add_argument("--features-csv", default="data/track_features.csv")
+    """Parse command-line options."""
+    p = argparse.ArgumentParser(description="Phase 4 — Cross-farm generalisation")
+    p.add_argument("--features-csv", default="data/results/trait_results/track_features.csv")
     p.add_argument("--splits-csv",   default="data/splits_folds.csv")
-    p.add_argument("--output-dir",   default="data/results/six_domain_v1")
+    p.add_argument("--output-dir",   default="data/results/trait_results")
     p.add_argument("--xgb-params",   default=None)
     p.add_argument("--xgb-threshold", type=float, default=None,
                    help="Fixed decision threshold from Phase 3 XGBoost results.")
@@ -251,6 +259,7 @@ def parse_args():
 
 
 def main():
+    """Load the data and the Phase 3 XGBoost settings, then run the evaluations."""
     args    = parse_args()
     out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,18 +277,18 @@ def main():
         xgb_res_path = out_dir / "prauc_protocol" / "xgboost_prauc" / "results.json"
         if not xgb_res_path.exists():
             raise SystemExit(
-                f"Phase 2 XGBoost PR-AUC result not found: {xgb_res_path}. "
-                "Run Phase 2 first or pass --xgb-params explicitly."
+                f"Phase 3 XGBoost result not found: {xgb_res_path}. "
+                "Run Phase 3 first or pass --xgb-params explicitly."
             )
         xgb_params = _params_from_xgb_result(xgb_res_path)
         if xgb_threshold is None:
             xgb_threshold = _threshold_from_xgb_result(xgb_res_path)
-        print(f"  Loaded Phase 2 XGBoost PR-AUC params from {xgb_res_path}")
+        print(f"  Loaded Phase 3 XGBoost params from {xgb_res_path}")
     xgb_params["n_jobs"] = int(args.n_jobs)
 
     print(f"  Using fixed XGBoost decision threshold = {float(xgb_threshold):.4f}")
     run_cross_farm(df, feature_cols, xgb_params, float(xgb_threshold), out_dir)
-    print("\n✓ Phase 5 cross-farm complete")
+    print("\n✓ Phase 4 cross-farm complete")
 
 
 if __name__ == "__main__":

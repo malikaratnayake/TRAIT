@@ -1,58 +1,33 @@
 """
 src/cross_farm_threshold_study.py
-===========================
-Supplementary / appendix study — cross-farm decision-threshold sensitivity.
+=================================
+Supplementary study — robustness of the decision threshold across farms
+(Supp. Table 9).
 
-Motivation
-----------
-The main Phase 4 cross-farm transfer study (src/cross_farm.py) reports
-PR-AUC, which is threshold-independent: it measures whether the model's
-*ranking* of tracks by predicted probability still separates insect from
-not_insect on an unseen farm. It does not, and cannot, say whether one
-specific fixed decision threshold (tau=0.53, tuned by validation F1 on the
-pooled training distribution) still lands at a sensible precision/recall
-point once the score distribution or class prior shifts to a different
-farm — two evaluations can have identical PR-AUC while the same absolute
-threshold performs very differently on each, particularly under a base-rate
-shift (this dataset's insect prevalence: ~12.9% overall, ~14.6% on the held-
-out test set, and farms are not guaranteed to match either figure). This is
-the "threshold selection... during cross-farm transfer" concern raised in
-the meta-review and vMAG's review (major weakness #3): does the deployed
-operating point generalise, not just the model's discrimination ability.
+Phase 4 (src/cross_farm.py) scores every within- and cross-farm evaluation
+at the single threshold τ = 0.53 chosen on pooled training data. PR-AUC does
+not depend on the threshold, but precision, recall and F1 do, and a fixed
+threshold may land at a poor operating point when the score distribution or
+the insect prevalence differs between farms.
 
-This script answers that question directly: for each of the four cross-farm
-evaluations (within-A, within-B, A->B, B->A), it reports precision/recall/F1
-at the fixed deployed threshold *and* at that evaluation's own locally-
-optimal threshold, so the gap between "what we'd get if we could re-tune per
-farm" and "what we actually get with one fixed threshold" is visible.
+For each of the four evaluations (A→A, B→B, A→B, B→A) this script retrains
+XGBoost exactly as Phase 4 does (same hyperparameters, seed and imputation)
+and reports precision, recall and F1 at the fixed threshold and at that
+evaluation's own F1-optimal threshold (a sweep from 0.05 to 0.95). The
+difference shows how much would be gained by re-tuning the threshold per
+farm. It writes to its own folder and does not change the Phase 4 results.
 
-Isolation from the main cross-farm study
------------------------------------------
-This script does NOT modify, import internals from, or write into anything
-touched by src/cross_farm.py. It is intentionally standalone:
-  - It re-derives its own train/test splits with a small amount of masking
-    logic duplicated locally (rather than changing src/cross_farm.py's
-    private helpers, which would touch the main study's code path).
-  - It retrains XGBoost independently, using the identical specification
-    (same SEED, same Phase 3 XGBoost params/threshold source) as
-    src/cross_farm.py's own evaluations, purely to obtain per-track
-    prediction scores for this threshold analysis. XGBoost with a fixed
-    random_state on identical data is effectively reproducible, so these
-    numbers should not materially differ from what src/cross_farm.py's own
-    (unpersisted) predictions would have shown.
-  - It writes to its own output subdirectory (cross_farm_threshold_study/)
-    and never touches cross_farm_results.csv or Table 4's numbers.
-Existing Phase 4 results and the run_pipeline_review.sh cross-farm step are
-therefore completely unaffected by this script — it can be run independently
-(before or after Phase 4) and its output is meant for the appendix /
-supplementary material only, not the main-text Table 4.
+Outputs (under <output-dir>/cross_farm_threshold_study/)
+--------------------------------------------------------
+  cross_farm_threshold_summary.csv      — one row per evaluation
+  cross_farm_threshold_predictions.csv  — per-track scores
 
-Usage
------
+Usage (after the pipeline has run)
+----------------------------------
   python src/cross_farm_threshold_study.py \\
-      --features-csv data/track_features.csv \\
+      --features-csv data/results/trait_results/track_features.csv \\
       --splits-csv   data/splits_folds.csv \\
-      --output-dir   data/results/six_domain_v1
+      --output-dir   data/results/trait_results
 """
 
 from __future__ import annotations
@@ -69,28 +44,24 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.models.data_loader import load_data, impute_train_eval
-# Reused verbatim from the main cross-farm study so this analysis trains
-# with the identical XGBoost specification — but nothing here writes back
-# into src/cross_farm.py or its outputs.
+# Reused from the Phase 4 study so this analysis trains the identical XGBoost
+# model (including its seed).
 from src.cross_farm import (
     _params_from_xgb_result,
     _threshold_from_xgb_result,
     _train_xgb,
 )
-# Note: _train_xgb closes over src/cross_farm.py's own SEED, so the XGBoost
-# random_state here is identical to the main cross-farm study's without this
-# module needing to import or re-specify it.
 
 SWEEP_THRESHOLDS = np.round(np.linspace(0.05, 0.95, 181), 4)
 
 
 # ---------------------------------------------------------------------------
-# Local split helpers (duplicated, not imported from cross_farm.py, so this
-# script cannot accidentally change that module's behaviour). Each returns
-# filenames alongside X/y so per-track predictions can be persisted.
+# Split helpers. Same partitions as src/cross_farm.py, but each also returns
+# the test filenames so per-track predictions can be saved.
 # ---------------------------------------------------------------------------
 
 def _within_farm_split_with_files(df, farm, feature_cols):
+    """Train on one farm's folds 0–3, test on its fold 4; also return test filenames."""
     farm_df    = df[df["cross_farm_role"] == farm]
     train_mask = farm_df["split_role"] == "trainval"
     test_mask  = farm_df["split_role"] == "test"
@@ -105,6 +76,7 @@ def _within_farm_split_with_files(df, farm, feature_cols):
 
 
 def _cross_farm_split_with_files(df, train_farm, feature_cols):
+    """Train on all tracks of train_farm, test on all tracks of the other farm; also return test filenames."""
     train_mask = df["cross_farm_role"] == train_farm
     test_mask  = ~train_mask
 
@@ -139,6 +111,7 @@ def _best_local_threshold(y_true, y_prob):
 
 
 def _metrics_at(y_true, y_prob, threshold):
+    """Precision, recall and F1 at a given threshold."""
     pred = (y_prob >= threshold).astype(int)
     return (
         precision_score(y_true, pred, zero_division=0),
@@ -152,12 +125,14 @@ def _metrics_at(y_true, y_prob, threshold):
 # ---------------------------------------------------------------------------
 
 def run_threshold_study(df, feature_cols, xgb_params, deployed_threshold, out_dir: Path):
-    print("\n── Supplementary study  Cross-farm threshold sensitivity ──────")
+    """Run the four evaluations at the fixed and locally optimal thresholds and save the results."""
+    print("\n── Cross-farm threshold sensitivity (Supp. Table 9) ──────────")
     print(f"  Deployed (fixed, pooled-training-tuned) threshold: {deployed_threshold:.4f}")
 
     pred_rows, summary_rows = [], []
 
     def _evaluate(evaluation, train_farm, test_farm, X_tr, y_tr, X_te, y_te, filenames_te):
+        """Train, score and record one evaluation."""
         model  = _train_xgb(X_tr, y_tr, xgb_params)
         y_prob = model.predict_proba(X_te)[:, 1]
         y_pred_deployed = (y_prob >= deployed_threshold).astype(int)
@@ -200,7 +175,7 @@ def run_threshold_study(df, feature_cols, xgb_params, deployed_threshold, out_di
             continue
         _evaluate(f"within_{farm}", farm, farm, X_tr, y_tr, X_te, y_te, fn_te)
 
-    # Cross-farm transfer (the condition of actual interest)
+    # Cross-farm transfer
     for train_farm, test_farm in [("Farm_A", "Farm_B"), ("Farm_B", "Farm_A")]:
         X_tr, y_tr, X_te, y_te, fn_te = _cross_farm_split_with_files(df, train_farm, feature_cols)
         _evaluate(f"{train_farm}_to_{test_farm}", train_farm, test_farm, X_tr, y_tr, X_te, y_te, fn_te)
@@ -228,7 +203,6 @@ def run_threshold_study(df, feature_cols, xgb_params, deployed_threshold, out_di
 
     print(f"\n  Predictions → {pred_path}")
     print(f"  Summary     → {summary_path}")
-    print("  (Appendix/supplementary output — main-text Table 4 / cross_farm_results.csv unaffected)")
     return summary_df
 
 
@@ -237,10 +211,11 @@ def run_threshold_study(df, feature_cols, xgb_params, deployed_threshold, out_di
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    """Parse command-line options."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--features-csv", default="data/track_features.csv")
+    p.add_argument("--features-csv", default="data/results/trait_results/track_features.csv")
     p.add_argument("--splits-csv",   default="data/splits_folds.csv")
-    p.add_argument("--output-dir",   default="data/results/six_domain_v1")
+    p.add_argument("--output-dir",   default="data/results/trait_results")
     p.add_argument("--xgb-params",   default=None)
     p.add_argument("--xgb-threshold", type=float, default=None,
                    help="Fixed decision threshold from Phase 3 XGBoost results.")
@@ -249,6 +224,7 @@ def parse_args():
 
 
 def main():
+    """Load the data and the Phase 3 XGBoost settings, then run the study."""
     args    = parse_args()
     out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -266,17 +242,17 @@ def main():
         xgb_res_path = out_dir / "prauc_protocol" / "xgboost_prauc" / "results.json"
         if not xgb_res_path.exists():
             raise SystemExit(
-                f"Phase 3 XGBoost PR-AUC result not found: {xgb_res_path}. "
+                f"Phase 3 XGBoost result not found: {xgb_res_path}. "
                 "Run Phase 3 first or pass --xgb-params explicitly."
             )
         xgb_params = _params_from_xgb_result(xgb_res_path)
         if xgb_threshold is None:
             xgb_threshold = _threshold_from_xgb_result(xgb_res_path)
-        print(f"  Loaded Phase 3 XGBoost PR-AUC params from {xgb_res_path}")
+        print(f"  Loaded Phase 3 XGBoost params from {xgb_res_path}")
     xgb_params["n_jobs"] = int(args.n_jobs)
 
     run_threshold_study(df, feature_cols, xgb_params, float(xgb_threshold), out_dir)
-    print("\n✓ Cross-farm threshold sensitivity study complete (supplementary)")
+    print("\n✓ Cross-farm threshold sensitivity study complete")
 
 
 if __name__ == "__main__":
