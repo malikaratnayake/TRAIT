@@ -1,44 +1,38 @@
 """
-src/train_fcn.py — Fully Convolutional Network (1D-CNN) baseline (Phase 3)
-=========================================================================
-End-to-end deep learning baseline on raw 2D centroid sequences, complementing
-miniROCKET as a second learned reference point. Implements the Fully
-Convolutional Network (FCN) of Wang, Yan & Oates, "Time Series Classification
-from Scratch with Deep Neural Networks" (IJCNN 2017) — the standard deep TSC
-baseline: three Conv1d blocks (128 → 256 → 128) with BatchNorm + ReLU, global
-average pooling, and a single linear output. No appearance information is used;
-the network learns directly from the trajectory, so it isolates the value of the
-hand-crafted six-domain representation against a purely data-driven model.
+src/train_fcn.py — 1D-CNN (FCN) sequence baseline (Phase 3)
+===========================================================
+Trains the Fully Convolutional Network of Wang, Yan & Oates, "Time Series
+Classification from Scratch with Deep Neural Networks" (IJCNN 2017) directly
+on the trajectories, as a learned baseline for the 125 engineered features:
+three Conv1d blocks (128 → 256 → 128) with BatchNorm + ReLU, global average
+pooling over the genuine (non-padded) frames, and a linear output, trained
+with class-weighted binary cross-entropy.
 
-Uses the SAME held-out test protocol as every other model:
+Preprocessing is the same as for the engineered features (paper Sec. 3.2):
+gaps are filled by linear interpolation and the track is Savitzky–Golay
+smoothed (src/utils/smoothing.smooth_coords). Each track becomes four
+channels — scale-normalised x and y, scale-normalised speed and signed
+heading change — padded or truncated to max_len (512) frames. This module
+also provides the preprocessing, latency and bootstrap helpers that
+train_convtran.py imports, so all sequence baselines see identical input.
+
+Protocol (Supp. Table 8):
   - Train : folds 0, 1, 2
-  - Val   : fold 3  (threshold sweep + early stopping / epoch selection)
-  - Test  : fold 4  (held-out, never touched during development)
+  - Val   : fold 3  (early stopping on validation PR-AUC, threshold by F1)
+  - Test  : fold 4  (held-out; the final model is refit on folds 0–3 for the
+            selected number of epochs)
+  AdamW (lr 1e-3, weight decay 1e-4), batch size 128, at most 60 epochs,
+  early-stopping patience 8, seed 42.
 
-Input :  data/tracks/          — per-track CSVs with columns [nframe, x, y]
-         data/splits_folds.csv — fold assignments
-Output:  data/results/six_domain_v1/fcn/fcn_results.csv
-         data/results/six_domain_v1/fcn/fcn_predictions.csv
-         data/results/six_domain_v1/fcn/fcn_pr_curve.csv
+Input :  data/tracks/                  — per-track CSVs with columns [nframe, x, y]
+         data/splits_folds.csv         — fold assignments
+         data/track_classification.csv — labels
+Output:  <output-dir>/fcn_results.csv       — metrics, CIs, latency, settings
+         <output-dir>/fcn_predictions.csv   — per-track test predictions
+         <output-dir>/<model-name>_pr_curve.csv
 
-Run from the TRAIT project root (needs PyTorch in $PYTHON):
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
+Run from the TRAIT project root (needs PyTorch):
     python src/train_fcn.py [--max_len 512] [--epochs 60] [--early-stop-metric pr_auc] [--check-deps]
-
-The four input channels (x_norm, y_norm, speed_norm, dheading) match
-train_rocket.py exactly, so the FCN and miniROCKET consume an identical
-trajectory representation without exposing absolute image-frame position.
-
-Preprocessing parity (2026-08 fix): gap-filling now reuses the exact
-linear-interpolation-then-SG-smoothing logic used by src/generate_features.py
-to build the engineered-feature set (via src/utils/smoothing.smooth_coords),
-instead of dropping missing-detection frames before smoothing. Previously
-this script discarded NaN rows prior to smoothing, which compressed the
-effective time base at every gap and fed the derived speed/heading channels
-spurious jumps at gap boundaries. Both baselines and the engineered features
-now consume an identical gap-filled trajectory; the only remaining difference
-is whether behaviour-informed features are computed from it or raw channels
-are fed directly to the model.
 """
 
 import argparse
@@ -148,12 +142,11 @@ def resolve_device(torch, requested: str):
 def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
     """Gap-fill via linear interpolation, then SG-smooth.
 
-    Reuses smooth_coords (src/utils/smoothing.py) with the exact same
-    interpolation step used by src/generate_features.py's on-the-fly
-    smoothing path (main(), ~line 2213): NaN gaps are linearly interpolated
-    over row index before the SG filter is applied, so the sequence baselines
-    consume the identical gap-filled trajectory as the engineered features,
-    rather than a version with missing-detection frames dropped.
+    Uses the same interpolation step and smooth_coords call as
+    src/generate_features.py: NaN gaps are linearly interpolated over row
+    index before the Savitzky–Golay filter is applied, so the sequence
+    baselines consume the same gap-filled trajectory as the engineered
+    features.
     """
     x = x_raw.astype(float).copy()
     y = y_raw.astype(float).copy()
@@ -315,6 +308,7 @@ def build_fcn(in_channels: int, nn):
     import torch
 
     class FCN(nn.Module):
+        """Wang et al. (2017) FCN with length-masked global average pooling."""
         def __init__(self, c_in: int):
             super().__init__()
             self.features = nn.Sequential(
@@ -328,6 +322,7 @@ def build_fcn(in_channels: int, nn):
             self.head = nn.Linear(128, 1)
 
         def forward(self, x, lengths=None):
+            """Return one logit per track; lengths masks padded frames out of the pooling."""
             h = self.features(x)                      # (N, 128, T)
             if lengths is None:
                 pooled = h.mean(dim=2)
@@ -350,6 +345,13 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
         limit: int | None = None, early_stop_metric: str = "f1",
         model_name: str | None = None, deterministic: bool = False,
         device_name: str = "auto"):
+    """Train the 1D-CNN, tune its threshold and evaluate it on the held-out test fold.
+
+    Folds 0–2 train the model with early stopping on fold 3, which also sets
+    the decision threshold; the model is then refit on folds 0–3 for the
+    selected number of epochs and scored once on fold 4. Results, per-track
+    predictions and the PR curve are written to RESULTS_DIR.
+    """
     if early_stop_metric not in {"f1", "pr_auc"}:
         raise ValueError("early_stop_metric must be either 'f1' or 'pr_auc'")
 
@@ -408,6 +410,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
 
     # ── 2. Load and featurise tracks ────────────────────────────────────────
     def build_array(file_list, desc: str):
+        """Load, preprocess and pad the tracks in file_list; return X, labels, lengths and filenames."""
         if limit is not None:
             file_list = file_list[:limit]
         X, y, L, fnames = [], [], [], []
@@ -448,6 +451,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     scaler.fit(_flat_train[_real_train])
 
     def apply_scaler(X):
+        """Standardise each channel with the scaler fitted on the training frames."""
         N, c, T = X.shape
         flat = scaler.transform(X.transpose(0, 2, 1).reshape(-1, c))
         return flat.reshape(N, T, c).transpose(0, 2, 1).astype(np.float32)
@@ -460,6 +464,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     from torch.utils.data import DataLoader, TensorDataset
 
     def loader(X, y, L, shuffle, loader_seed: int = LOADER_SEED):
+        """DataLoader over (X, y, lengths), shuffled with a fixed seed when shuffle is True."""
         ds = TensorDataset(torch.from_numpy(X),
                            torch.from_numpy(y),
                            torch.from_numpy(L))
@@ -469,6 +474,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     train_loader = loader(X_train, y_train, L_train, True)
 
     def make_criterion(y_values):
+        """Binary cross-entropy weighted by the negative-to-positive ratio of y_values."""
         n_pos = int(np.sum(y_values))
         n_neg = int(len(y_values) - n_pos)
         pos_weight = torch.tensor(
@@ -482,6 +488,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
 
     @torch.no_grad()
     def predict_proba(model, X, L):
+        """Insect probabilities for X, predicted in chunks."""
         model.eval()
         out = []
         for i in range(0, len(X), 1024):
@@ -500,6 +507,12 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
         val_y=None,
         val_L=None,
     ):
+        """Train a fresh model for up to n_epochs.
+
+        With validation data, stops early when the validation metric has not
+        improved for PATIENCE epochs and restores the best weights. Returns the
+        model, the best epoch and the best validation metric.
+        """
         torch.manual_seed(model_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(model_seed)
@@ -586,6 +599,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     sample_len = int(L_test[0])   # genuine length of the latency probe track
 
     def predict_one_track(x):
+        """Classify one preprocessed track (used for latency measurement)."""
         xb = torch.from_numpy(np.asarray(x, dtype=np.float32)).to(device)
         lb = torch.full((xb.shape[0],), sample_len, dtype=torch.long, device=device)
         with torch.no_grad():

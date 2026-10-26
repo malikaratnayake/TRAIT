@@ -80,10 +80,8 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Reuse the exact preprocessing / evaluation harness used by the other
-# sequence baselines, rather than reimplementing gap-filling, smoothing, or
-# channel construction a fourth time. This is the load-bearing choice for
-# preprocessing parity across all sequence baselines.
+# Preprocessing and evaluation helpers shared with the 1D-CNN, so every
+# sequence baseline sees exactly the same input.
 from src.train_fcn import (  # noqa: E402
     CHANNELS,
     SEED,
@@ -217,6 +215,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             self.register_buffer("pe", pe.unsqueeze(0))
 
         def forward(self, x):
+            """Add the positional encoding to x of shape (N, T, d_model)."""
             T = x.size(1)
             return x + self.pe[:, :T, :]
 
@@ -246,6 +245,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             self.register_buffer("relative_index", relative_index)
 
         def forward(self, x, key_padding_mask=None):
+            """Attend over x (N, T, d_model); padded keys are masked out."""
             B, T, _ = x.shape
             q = self.q(x).reshape(B, T, self.n_heads, self.d_head).transpose(1, 2)
             k = self.k(x).reshape(B, T, self.n_heads, self.d_head).transpose(1, 2)
@@ -287,6 +287,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             self.norm2 = nn.LayerNorm(d_model, eps=1e-5)
 
         def forward(self, x, pad_mask=None):
+            """Apply the block to x (N, T, d_model), ignoring padded positions."""
             att = x + self.attn(x, key_padding_mask=pad_mask)
             att = self.norm1(att)
             out = att + self.ff(att)
@@ -294,6 +295,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             return out
 
     class ConvTranTSC(nn.Module):
+        """ConvTran classifier: disjoint-CNN tokeniser, tAPE, encoder block(s) and a masked-mean-pooled linear head."""
         def __init__(self, c_in: int, emb_size: int, n_heads: int, n_layers: int,
                      dim_feedforward: int, dropout: float, max_len: int, conv_kernel: int):
             super().__init__()
@@ -318,6 +320,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             self.head = nn.Linear(emb_size, 1)
 
         def forward(self, x, lengths=None):
+            """Return one logit per track for x of shape (N, C, T); lengths marks the genuine frames."""
             # x: (N, C, T)
             B, C, T = x.shape
             h = x.unsqueeze(1)                 # (N, 1, C, T)
@@ -357,6 +360,13 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
         device_name: str = "auto", warmup_ratio: float = WARMUP_RATIO,
         emb_size: int = EMB_SIZE, num_heads: int = NUM_HEADS, n_layers: int = N_LAYERS,
         dim_feedforward: int = DIM_FEEDFORWARD, dropout: float = DROPOUT):
+    """Train ConvTran, tune its threshold and evaluate it on the held-out test fold.
+
+    Same protocol as train_fcn.run: early stopping and threshold selection on
+    fold 3, refit on folds 0–3 for the selected number of epochs, one
+    evaluation on fold 4. Results, per-track predictions and the PR curve are
+    written to RESULTS_DIR.
+    """
     if early_stop_metric not in {"f1", "pr_auc"}:
         raise ValueError("early_stop_metric must be either 'f1' or 'pr_auc'")
 
@@ -418,6 +428,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
 
     # ── 2. Load and featurise tracks (identical to train_fcn.py) ────────────
     def build_array(file_list, desc: str):
+        """Load, preprocess and pad the tracks in file_list; return X, labels, lengths and filenames."""
         if limit is not None:
             file_list = file_list[:limit]
         X, y, L, fnames = [], [], [], []
@@ -455,6 +466,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     scaler.fit(_flat_train[_real_train])
 
     def apply_scaler(X):
+        """Standardise each channel with the scaler fitted on the training frames."""
         N, c, T = X.shape
         flat = scaler.transform(X.transpose(0, 2, 1).reshape(-1, c))
         return flat.reshape(N, T, c).transpose(0, 2, 1).astype(np.float32)
@@ -467,6 +479,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     from torch.utils.data import DataLoader, TensorDataset
 
     def loader(X, y, L, shuffle, loader_seed: int = LOADER_SEED):
+        """DataLoader over (X, y, lengths), shuffled with a fixed seed when shuffle is True."""
         ds = TensorDataset(torch.from_numpy(X),
                            torch.from_numpy(y),
                            torch.from_numpy(L))
@@ -476,6 +489,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     train_loader = loader(X_train, y_train, L_train, True)
 
     def make_criterion(y_values):
+        """Binary cross-entropy weighted by the negative-to-positive ratio of y_values."""
         n_pos = int(np.sum(y_values))
         n_neg = int(len(y_values) - n_pos)
         pos_weight = torch.tensor(
@@ -489,6 +503,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
 
     @torch.no_grad()
     def predict_proba(model, X, L):
+        """Insect probabilities for X, predicted in small chunks to limit attention memory."""
         # Small eval chunk (not FCN's 1024): self-attention memory scales
         # with batch_size * n_heads * max_len^2, so a large eval chunk at
         # max_len=512 can spike memory even under no_grad().
@@ -511,6 +526,12 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
         val_y=None,
         val_L=None,
     ):
+        """Train a fresh model for up to n_epochs with the warmup + cosine LR schedule.
+
+        With validation data, stops early when the validation metric has not
+        improved for PATIENCE epochs and restores the best weights. Returns the
+        model, the best epoch and the best validation metric.
+        """
         torch.manual_seed(model_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(model_seed)
@@ -606,6 +627,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     sample_len = int(L_test[0])   # genuine length of the latency probe track
 
     def predict_one_track(x):
+        """Classify one preprocessed track (used for latency measurement)."""
         xb = torch.from_numpy(np.asarray(x, dtype=np.float32)).to(device)
         lb = torch.full((xb.shape[0],), sample_len, dtype=torch.long, device=device)
         with torch.no_grad():

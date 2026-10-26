@@ -1,27 +1,31 @@
 """
-src/train_rocket.py — MiniROCKET baseline (Phase 3)
-==================================================
-Runs MiniROCKET on the 28k insect-track dataset
-using the same held-out test protocol as all other models:
+src/train_rocket.py — miniROCKET sequence baseline (Phase 3)
+============================================================
+Classifies the trajectories with MiniROCKET (Dempster et al., KDD 2021):
+10,000 fixed random convolutional kernels (aeon) followed by a
+class-balanced ridge classifier.
+
+Input preprocessing is identical to train_fcn.py: linear gap filling,
+Savitzky–Golay smoothing, and the same four channels (scale-normalised x, y
+and speed, signed heading change) padded or truncated to max_len (512).
+
+Protocol (Supp. Table 8):
   - Train : folds 0, 1, 2
-  - Val   : fold 3  (threshold sweep)
-  - Test  : fold 4  (held-out, never touched during development)
+  - Val   : fold 3  (ridge alpha chosen from logspace(-4, 4, 20) by validation
+            PR-AUC; decision threshold by validation F1)
+  - Test  : fold 4  (held-out; the ridge classifier is refit on folds 0–3)
+  Latency is the mean of 200 timed single-track predictions after 20 warm-up
+  calls.
 
-Input :  data/tracks/          — per-track CSVs with columns [nframe, x, y]
-         data/splits_folds.csv — fold assignments
-Output:  data/results/six_domain_v1/rocket/rocket_results.csv
-         data/results/six_domain_v1/rocket/rocket_predictions.csv
+Input :  data/tracks/                  — per-track CSVs with columns [nframe, x, y]
+         data/splits_folds.csv         — fold assignments
+         data/track_classification.csv — labels
+Output:  <output-dir>/rocket_results.csv      — metrics, CIs, latency, settings
+         <output-dir>/rocket_predictions.csv  — per-track test predictions
+         <output-dir>/<model-name>_pr_curve.csv
 
-Run from the TRAIT project root (aeon installed in trait-env, see requirements.txt):
+Run from the TRAIT project root (needs aeon, see requirements.txt):
     python src/train_rocket.py [--max_len 512]
-
-Dependencies:
-    aeon == 1.3.0, numba < 0.62, numpy < 2, scikit-learn, scipy, pandas
-
-Preprocessing parity (2026-08 fix): gap-filling now reuses the exact
-linear-interpolation-then-SG-smoothing logic used by src/generate_features.py
-(via src/utils/smoothing.smooth_coords) instead of dropping missing-detection
-frames before smoothing. See train_fcn.py for the same fix and rationale.
 """
 
 import argparse
@@ -31,9 +35,9 @@ import time
 import warnings
 from pathlib import Path
 
-# aeon/numba MiniROCKET segfaults on this macOS/ARM environment when numba uses
-# its OpenMP backend with more than one worker. The workqueue backend preserves
-# parallel execution without hitting that native crash path.
+# aeon/numba MiniROCKET can crash on some platforms (seen on macOS/ARM) when
+# numba uses its OpenMP backend with more than one worker. The workqueue backend
+# keeps parallel execution without that crash.
 os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -79,12 +83,10 @@ RESULTS_DIR    = Path("data/results/trait_results/rocket_prauc")
 def interpolate_and_smooth(x_raw: np.ndarray, y_raw: np.ndarray):
     """Gap-fill via linear interpolation, then SG-smooth.
 
-    Reuses smooth_coords (src/utils/smoothing.py) with the exact same
-    interpolation step used by src/generate_features.py's on-the-fly
-    smoothing path (main(), ~line 2213): NaN gaps are linearly interpolated
-    over row index before the SG filter is applied, so this baseline
-    consumes the identical gap-filled trajectory as the engineered features,
-    rather than a version with missing-detection frames dropped.
+    Uses the same interpolation step and smooth_coords call as
+    src/generate_features.py: NaN gaps are linearly interpolated over row
+    index before the Savitzky–Golay filter is applied, so this baseline
+    consumes the same gap-filled trajectory as the engineered features.
     """
     x = x_raw.astype(float).copy()
     y = y_raw.astype(float).copy()
@@ -270,6 +272,11 @@ def check_dependencies():
 
 def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
         model_name: str | None = None, limit: int | None = None):
+    """Fit MiniROCKET and the ridge classifier, tune the threshold and evaluate on the test fold.
+
+    Results, per-track predictions and the PR curve are written to
+    RESULTS_DIR.
+    """
     model_name = model_name or "MiniROCKET"
     selection_metric = "pr_auc"
     requested_n_jobs = int(n_jobs)
@@ -319,6 +326,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
 
     # ── 3. Load and featurise tracks ────────────────────────────────────────
     def build_array(file_set: set, desc: str):
+        """Load, preprocess and pad the tracks in file_set; return X, labels and filenames."""
         files_sorted = sorted(file_set)
         if limit is not None:
             files_sorted = files_sorted[:limit]
@@ -412,6 +420,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
     y_pred = (test_scores >= best_thr).astype(int)
 
     def predict_one_track(x):
+        """Classify one preprocessed track (used for latency measurement)."""
         x_feat = rocket.transform(x)
         x_feat = scaler.transform(x_feat)
         return ridge_final.predict(x_feat)

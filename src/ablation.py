@@ -1,36 +1,36 @@
 """
 src/ablation.py
-=========================
-Phase 3 — Feature-domain ablation and feature-importance analysis.
+===============
+Phase 5 — Ablation studies and feature importance for XGBoost.
 
-Studies
--------
-  Phase 3a  Cumulative domain ablation
-              Domain 1 → Domain 1-2 → Domain 1-3 → Domain 1-4 → Domain 1-5 → Domain 1-6
-  Phase 3c  Single-domain-only ablation
-              Domain 1 only → Domain 2 only → ... → Domain 6 only
-  Phase 3d  Leave-one-feature-group-out (LOO) ablation
-              Drop one biological subgroup at a time, measure F1 drop.
-  Phase 3e  Feature importance analysis
-              XGBoost gain importance + permutation importance.
+  5a  Cumulative domain ablation (Table 5)
+        D1 → D1–D2 → … → D1–D6, scored at the deployed threshold τ = 0.53
+  5b  Single-domain ablation (Table 6)
+        one model per domain, each with its own out-of-fold F1-optimal threshold
+  5c  Leave-one-subgroup-out ablation (Supp. Table 12, Supp. Figure 1)
+        each of the 32 subgroups removed in turn, scored at τ = 0.53
+  5d  Feature importance (Supp. Table 13)
+        XGBoost gain and permutation importance (drop in test PR-AUC and F1
+        when one feature is shuffled)
 
-All ablations use XGBoost trained on trainval folds 0-3 and evaluated
-on the held-out station-disjoint test set (fold 4).
+Every configuration uses the Phase 3 XGBoost hyperparameters, is trained on
+folds 0–3 and is evaluated on the held-out test fold (fold 4).
 
-Public API
-----------
-  run_cumulative_domain_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
-  run_single_domain_only_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
-  run_group_loo_ablation(df, feature_cols, xgb_params, out_dir)
-  run_feature_importance(df, feature_cols, xgb_params, out_dir)
-  run_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)  # runs all studies
+Outputs (under <output-dir>/ablation/)
+--------------------------------------
+  domain_ablation_results.csv     — 5a
+  domain_only_results.csv         — 5b
+  group_loo_ablation.csv / .json  — 5c
+  feature_importance.csv          — 5d, one row per feature
+  group_importance_summary.csv    — 5d summed by subgroup
+  redundant_feature_pairs.csv     — feature pairs with high correlation
 
-Usage (CLI)
------------
+Usage
+-----
   python src/ablation.py \\
-      --features-csv data/track_features.csv \\
+      --features-csv data/results/trait_results/track_features.csv \\
       --splits-csv   data/splits_folds.csv \\
-      --output-dir   data/results/six_domain_v1
+      --output-dir   data/results/trait_results
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ SEED   = 42
 N_BOOT = 500   # reduced for speed in ablation experiments
 
 # Decision threshold for the FULL 125-feature configuration. When set from the
-# Phase-2 XGBoost PR-AUC result, fixed-threshold ablations reuse the main model's
+# Phase 3 XGBoost result, fixed-threshold ablations reuse the main model's
 # operating point. Single-domain-only ablations use their own OOF threshold
 # because their score scales can differ substantially from the full model.
 _FULL_SET_THRESHOLD: "float | None" = None
@@ -80,6 +80,7 @@ def _params_from_xgb_result(path: Path) -> dict:
 
 
 def _train_xgb(X_tr, y_tr, params, spw=None):
+    """Fit XGBoost with the given hyperparameters and a class-balancing scale_pos_weight."""
     import xgboost as xgb
     if spw is None:
         spw = float((y_tr == 0).sum() / max((y_tr == 1).sum(), 1))
@@ -112,12 +113,9 @@ def _find_f1_threshold(y_true, y_score) -> float:
 def _oof_threshold(df, keep_cols, feature_cols, xgb_params) -> float:
     """F1-optimal decision threshold from out-of-fold validation predictions.
 
-    Mirrors the Phase-2 PR-AUC protocol: for each configuration, XGBoost is
-    trained on the inner training folds and scored on the held-out validation
-    fold; the pooled out-of-fold scores are used to choose the F1-optimal
-    threshold. This replaces the fixed 0.5 default so every ablation row reports
-    F1/precision/recall at a tuned, leakage-free operating point (the full
-    125-feature row then matches the main comparison table).
+    Same procedure as Phase 3: for each configuration, XGBoost is trained on
+    three of folds 0–3 and scored on the fourth; the pooled out-of-fold scores
+    are used to choose the F1-optimal threshold, so no test data is used.
     """
     keep_idx = [feature_cols.index(c) for c in keep_cols]
     oof_scores, oof_true = [], []
@@ -134,7 +132,7 @@ def _eval_subset(df, keep_cols, feature_cols, xgb_params, threshold_mode="fixed"
 
     threshold_mode controls the decision threshold:
       "fixed" — score at the deployed full-model operating point
-                (_FULL_SET_THRESHOLD, e.g. 0.56). Every row shares one threshold,
+                (_FULL_SET_THRESHOLD, 0.53 in the paper). Every row shares one threshold,
                 so F1/precision/recall changes reflect the feature set alone.
                 Used for the cumulative-domain and leave-one-group-out studies,
                 and makes the full 125-feature row match the main comparison
@@ -166,7 +164,7 @@ def _eval_subset(df, keep_cols, feature_cols, xgb_params, threshold_mode="fixed"
 
 
 # ---------------------------------------------------------------------------
-# Phase 3a — Cumulative domain ablation
+# 5a — Cumulative domain ablation (Table 5)
 # ---------------------------------------------------------------------------
 
 def run_cumulative_domain_ablation(
@@ -176,13 +174,11 @@ def run_cumulative_domain_ablation(
     xgb_params: dict,
     out_dir: Path,
 ) -> pd.DataFrame:
-    """
-    Cumulative domain ablation: train with Domain1, then Domain1+2, ..., Domain1-6.
+    """Cumulative domain ablation (Table 5): train on D1, then D1–D2, …, D1–D6.
 
-    This quantifies each domain's incremental contribution to F1 and PR-AUC,
-    answering: *how much does each layer of biological feature engineering add?*
+    Quantifies each domain's incremental contribution to PR-AUC and F1.
     """
-    print("\n── Phase 3a  Cumulative domain ablation ───────────────────────")
+    print("\n── Phase 5a  Cumulative domain ablation ───────────────────────")
     try:
         import xgboost as xgb
     except ImportError:
@@ -243,7 +239,7 @@ def run_cumulative_domain_ablation(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3c — Single-domain-only ablation
+# 5b — Single-domain ablation (Table 6)
 # ---------------------------------------------------------------------------
 
 def run_single_domain_only_ablation(
@@ -254,7 +250,7 @@ def run_single_domain_only_ablation(
     out_dir: Path,
 ) -> pd.DataFrame:
     """Train one model per domain using features from only that domain."""
-    print("\n── Phase 3c  Single-domain-only ablation ──────────────────────")
+    print("\n── Phase 5b  Single-domain ablation ───────────────────────────")
 
     domain_names = ["Domain1", "Domain2", "Domain3", "Domain4", "Domain5", "Domain6"]
     m_base, _, _ = _eval_subset(df, feature_cols, feature_cols, xgb_params)
@@ -322,7 +318,7 @@ def run_single_domain_only_ablation(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3d — Leave-one-feature-group-out (LOO) ablation
+# 5c — Leave-one-subgroup-out ablation (Supp. Table 12)
 # ---------------------------------------------------------------------------
 
 def run_group_loo_ablation(
@@ -331,15 +327,14 @@ def run_group_loo_ablation(
     xgb_params: dict,
     out_dir: Path,
 ) -> pd.DataFrame:
-    """
-    For each biological feature subgroup, retrain XGBoost with that group
-    removed and measure the change in F1 ('contribution').
+    """Leave-one-subgroup-out ablation (Supp. Table 12).
 
-    A large positive contribution means that group is critical.
-    A negative contribution means removing the group *improves* F1 —
-    suggesting the features are noisy or redundant for this dataset.
+    For each of the 32 subgroups, retrain XGBoost with that subgroup removed
+    and record test PR-AUC and F1. A positive drop means the subgroup
+    contributed; a negative drop means the model did slightly better without
+    it.
     """
-    print("\n── Phase 3d  Leave-one-feature-group-out (LOO) ablation ───────")
+    print("\n── Phase 5c  Leave-one-subgroup-out ablation ──────────────────")
     try:
         import xgboost as xgb
     except ImportError:
@@ -431,7 +426,7 @@ def run_group_loo_ablation(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3e — Feature importance analysis
+# 5d — Feature importance (Supp. Table 13)
 # ---------------------------------------------------------------------------
 
 def run_feature_importance(
@@ -440,15 +435,16 @@ def run_feature_importance(
     xgb_params: dict,
     out_dir: Path,
 ) -> pd.DataFrame:
-    """
-    Analyse feature importance via:
-      (a) XGBoost gain-based importance
-      (b) Permutation importance (F1 drop when a feature is shuffled)
+    """Feature importance (Supp. Table 13).
 
-    Also computes redundancy: features with high pairwise |Pearson r|
-    are flagged as potentially redundant.
+      (a) XGBoost gain importance
+      (b) Permutation importance: drop in test PR-AUC and F1 when one feature
+          is shuffled
+
+    Also flags feature pairs with high pairwise |Pearson r| as potentially
+    redundant.
     """
-    print("\n── Phase 3e  Feature importance analysis ──────────────────────")
+    print("\n── Phase 5d  Feature importance ───────────────────────────────")
     try:
         import xgboost as xgb
     except ImportError:
@@ -565,8 +561,8 @@ def run_feature_importance(
     if len(redund_df):
         redund_df.to_csv(out_dir_abl / "redundant_feature_pairs.csv", index=False)
 
-    # Save the feature-importance fit with the ablation outputs. The active
-    # Phase 2 XGBoost model lives under prauc_protocol/xgboost_prauc/.
+    # Save the feature-importance fit with the ablation outputs. The Phase 3
+    # XGBoost model itself is in prauc_protocol/xgboost_prauc/.
     model_dir = out_dir_abl
     model_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(model_dir / "xgb_feature_importance_model.ubj"))
@@ -588,7 +584,7 @@ def run_ablation(
     xgb_params: dict,
     out_dir: Path,
 ) -> dict:
-    """Run all Phase 3 ablation studies and return combined results dict."""
+    """Run the four Phase 5 analyses and return their results."""
     domain_df = run_cumulative_domain_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
     domain_only_df = run_single_domain_only_ablation(
         df, feature_cols, domain_groups, xgb_params, out_dir
@@ -609,13 +605,14 @@ def run_ablation(
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Phase 3 — Feature-domain ablation studies")
-    p.add_argument("--features-csv",    default="data/track_features.csv")
+    """Parse command-line options."""
+    p = argparse.ArgumentParser(description="Phase 5 — Ablation studies and feature importance")
+    p.add_argument("--features-csv",    default="data/results/trait_results/track_features.csv")
     p.add_argument("--splits-csv",      default="data/splits_folds.csv")
-    p.add_argument("--output-dir",      default="data/results/six_domain_v1")
+    p.add_argument("--output-dir",      default="data/results/trait_results")
     p.add_argument("--full-threshold",  type=float, default=None,
                    help="Decision threshold for the full-feature row (defaults to the "
-                        "Phase-2 XGBoost PR-AUC threshold so Tables 5/6 match Table 3).")
+                        "Phase 3 XGBoost threshold, so the full-feature row matches Table 3).")
     p.add_argument("--xgb-params",      default=None,
                    help="JSON string of XGBoost params, e.g. '{\"max_depth\":5}'")
     p.add_argument("--n-jobs", type=int, default=int(os.environ.get("TRAIT_N_JOBS", "-1")),
@@ -626,6 +623,7 @@ def parse_args():
 
 
 def main():
+    """Load the data and the Phase 3 XGBoost settings, then run the requested ablations."""
     args       = parse_args()
     out_dir    = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -640,11 +638,11 @@ def main():
         xgb_res_path = out_dir / "prauc_protocol" / "xgboost_prauc" / "results.json"
         if not xgb_res_path.exists():
             raise SystemExit(
-                f"Phase 2 XGBoost PR-AUC result not found: {xgb_res_path}. "
-                "Run Phase 2 first or pass --xgb-params explicitly."
+                f"Phase 3 XGBoost result not found: {xgb_res_path}. "
+                "Run Phase 3 first or pass --xgb-params explicitly."
             )
         xgb_params = _params_from_xgb_result(xgb_res_path)
-        print(f"  Loaded Phase 2 XGBoost PR-AUC params from {xgb_res_path}")
+        print(f"  Loaded Phase 3 XGBoost params from {xgb_res_path}")
     xgb_params["n_jobs"] = int(args.n_jobs)
 
     # Anchor the full-feature ablation row to the main model's operating point.
@@ -669,7 +667,7 @@ def main():
         )
     else:
         run_ablation(df, feature_cols, domain_groups, xgb_params, out_dir)
-    print("\n✓ Phase 3 ablation complete")
+    print("\n✓ Phase 5 ablation complete")
 
 
 if __name__ == "__main__":
