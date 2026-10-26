@@ -171,6 +171,13 @@ if [[ -z "$FPS" && -f "$CFG_FILE" ]]; then
     FPS=$(grep "^fps=" "$CFG_FILE" 2>/dev/null | cut -d= -f2 || true)
 fi
 
+# ── Never write into a locked (read-only) results folder ─────────────────────
+if [[ "$DRY_RUN" -eq 0 && -d "$RESULTS" && -n "$(find "$RESULTS" ! -perm -u+w -print -quit)" ]]; then
+    echo "Results folder $RESULTS contains read-only (locked) files." >&2
+    echo "Choose another --run-name or --results-dir." >&2
+    exit 1
+fi
+
 # ── Overwrite mode ────────────────────────────────────────────────────────────
 if [[ "$OVERWRITE_RESULTS" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
     echo "  overwrite: removing $RESULTS …"
@@ -912,7 +919,7 @@ PYEOF
         "$REPO/src/figures/plot_pr_curves.py" \
         "$REPO/run_pipeline.sh"; then
         log "3.9  Plotting precision-recall curves (majority, LR, RF, XGBoost, 1D-CNN, miniROCKET, ConvTran) …"
-        mkdir -p "$FIGURES_DIR"
+        [[ "$DRY_RUN" -eq 1 ]] || mkdir -p "$FIGURES_DIR"
         run_cmd "$PYTHON" src/figures/plot_pr_curves.py \
             --results-dir "$RESULTS" \
             --output-csv  "$RESULTS/phase3_precision_recall_curves.csv" \
@@ -1084,7 +1091,7 @@ if needs_run_with_deps "$STEP" 5 \
         warn "Group LOO ablation results missing — skipping ablation plot"
     else
         log "5.2  Plotting group leave-one-out ablation effects …"
-        mkdir -p "$FIGURES_DIR"
+        [[ "$DRY_RUN" -eq 1 ]] || mkdir -p "$FIGURES_DIR"
         if run_cmd "$PYTHON" src/figures/plot_group_loo.py \
             --input-csv  "$RESULTS/ablation/group_loo_ablation.csv" \
             --output-csv "$RESULTS/ablation/group_loo_prauc_top_positive_negative.csv" \
@@ -1106,7 +1113,7 @@ if needs_run_with_deps "$STEP" 5 \
     "$REPO/src/figures/_track_utils.py" \
     "$REPO/run_pipeline.sh"; then
     log "5.3  Plotting trajectory figures …"
-    mkdir -p "$FIGURES_DIR"
+    [[ "$DRY_RUN" -eq 1 ]] || mkdir -p "$FIGURES_DIR"
     FIGURES_OK=1
     run_cmd "$PYTHON" src/figures/plot_class_trajectory_overlays.py \
         --splits-csv "$SPLITS_CSV" \

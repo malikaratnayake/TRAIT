@@ -254,7 +254,7 @@ bash run_pipeline.sh --fps 30 --test-run --run-name paper --from-phase 3 \
 ```
 TRAIT/
 ├── run_pipeline.sh                     # Runs the full pipeline (Phases 1–5)
-├── clean.sh                            # Deletes generated outputs (dry run unless --confirm)
+├── clean.sh                            # Deletes one run folder (dry run unless --confirm)
 ├── requirements.txt                    # Pinned dependencies used for the paper
 ├── data/                               # Put the downloaded dataset here
 └── src/
@@ -283,8 +283,9 @@ TRAIT/
         └── metadata.py                 # Parses farm, location and station from file names
 ```
 
-To delete all generated outputs and start from scratch, run `bash clean.sh --confirm`.
-The downloaded dataset is kept.
+To start a run again from scratch, delete its folder with `bash clean.sh <run-name> --confirm`
+(without `--confirm` it only lists what would be deleted). It never touches the dataset, the
+split files or run folders that contain read-only files.
 
 ---
 
