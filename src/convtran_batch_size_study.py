@@ -29,8 +29,8 @@ This script does not modify src/train_convtran.py and does not touch the
 main reported ConvTran result (data/results/<run>/convtran_prauc/). It
 invokes src/train_convtran.py as a separate subprocess once per batch size,
 each writing to its own subdirectory under --output-dir, then aggregates
-the per-batch-size results.csv files into one summary table. It is not
-wired into run_pipeline_review.sh and must be run manually.
+the per-batch-size results.csv files into one summary table. The pipeline
+runs it when given --convtran-batch-sweep; it can also be run on its own.
 
 Runtime note
 ------------
@@ -44,8 +44,8 @@ full ~23k-track training set).
 Usage
 -----
   python src/convtran_batch_size_study.py \\
-      --batch-sizes 16 32 64 96 128 192 \\
-      --output-dir data/results/six_domain_v1
+      --batch-sizes 16 32 64 96 128 \\
+      --output-dir data/results/trait_results
 
   Smoke test (fast, not for reporting):
   python src/convtran_batch_size_study.py --batch-sizes 16 32 --limit 300 --epochs 3
@@ -62,7 +62,7 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BATCH_SIZES = [16, 32, 64, 96, 128, 192]
+DEFAULT_BATCH_SIZES = [16, 32, 64, 96, 128]
 
 
 def run_one_batch_size(python_exe: str, batch_size: int, study_dir: Path, args) -> Path:
@@ -92,6 +92,11 @@ def run_one_batch_size(python_exe: str, batch_size: int, study_dir: Path, args) 
         "--output-dir", str(run_dir),
         "--device", args.device,
     ]
+    for flag, value in (("--tracks-dir", args.tracks_dir),
+                        ("--splits-csv", args.splits_csv),
+                        ("--labels-csv", args.labels_csv)):
+        if value is not None:
+            cmd += [flag, str(Path(value).expanduser().resolve())]
     if args.limit is not None:
         cmd += ["--limit", str(args.limit)]
     if args.deterministic:
@@ -194,7 +199,10 @@ def parse_args():
                    help="Enabled by default so batch-size is the only thing varying run-to-run")
     p.add_argument("--no-deterministic", dest="deterministic", action="store_false")
     p.add_argument("--limit", type=int, default=None, help="Smoke-testing only — caps tracks per split")
-    p.add_argument("--output-dir", default="data/results/six_domain_v1")
+    p.add_argument("--output-dir", default="data/results/trait_results")
+    p.add_argument("--tracks-dir", default=None, help="Passed to train_convtran.py (default: its own)")
+    p.add_argument("--splits-csv", default=None, help="Passed to train_convtran.py (default: its own)")
+    p.add_argument("--labels-csv", default=None, help="Passed to train_convtran.py (default: its own)")
     p.add_argument("--python", default=None, help="Python interpreter to use (default: current interpreter)")
     p.add_argument("--overwrite", action="store_true", help="Re-run batch sizes that already have results")
     return p.parse_args()

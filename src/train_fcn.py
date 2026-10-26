@@ -85,11 +85,11 @@ LR          = 1e-3
 WEIGHT_DECAY = 1e-4
 PATIENCE    = 8          # early-stopping patience on the selected validation metric
 
-# Paths (relative to project root)
+# Default paths (relative to project root); overridden by the CLI options.
 TRACKS_DIR  = Path("data/tracks")
 SPLITS_CSV  = Path("data/splits_folds.csv")
-RESULTS_DIR = Path("data/results/six_domain_v1/fcn")
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+LABELS_CSV  = Path("data/track_classification.csv")
+RESULTS_DIR = Path("data/results/trait_results/fcn_prauc")
 
 
 # ─── Lazy torch import ─────────────────────────────────────────────────────────
@@ -380,6 +380,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     print(f"{'='*60}\n")
 
     # ── 1. Load splits ──────────────────────────────────────────────────────
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     print("Loading splits…")
     splits = pd.read_csv(SPLITS_CSV)
     train_files = list(splits[splits.fold.isin([0, 1, 2])]["filename"])
@@ -388,7 +389,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
 
     # Ground-truth labels (same resolution logic as train_rocket.py)
     try:
-        labels_df = pd.read_csv("data/track_classification.csv")
+        labels_df = pd.read_csv(LABELS_CSV)
         if "filename" not in labels_df.columns and "filepath" in labels_df.columns:
             labels_df["filename"] = labels_df["filepath"].apply(lambda p: Path(p).name)
     except FileNotFoundError:
@@ -397,7 +398,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
             labels_df["label"] = splits["label"]
         else:
             raise FileNotFoundError(
-                "Cannot find data/track_classification.csv — "
+                f"Cannot find {LABELS_CSV} — "
                 "ensure it has columns [filename/filepath, label] where label ∈ {insect, not_insect}"
             )
 
@@ -685,12 +686,20 @@ if __name__ == "__main__":
     parser.add_argument("--check-deps", action="store_true",
                         help="Verify the torch import and exit")
     parser.add_argument("--output-dir", default=None,
-                        help="Override results directory (default: data/results/six_domain_v1/fcn)")
+                        help=f"Results directory (default: {RESULTS_DIR})")
+    parser.add_argument("--tracks-dir", default=str(TRACKS_DIR),
+                        help=f"Directory of per-track CSVs (default: {TRACKS_DIR})")
+    parser.add_argument("--splits-csv", default=str(SPLITS_CSV),
+                        help=f"Fold assignments from create_splits.py (default: {SPLITS_CSV})")
+    parser.add_argument("--labels-csv", default=str(LABELS_CSV),
+                        help=f"Track labels with filepath and label columns (default: {LABELS_CSV})")
     args = parser.parse_args()
 
+    TRACKS_DIR = Path(args.tracks_dir)
+    SPLITS_CSV = Path(args.splits_csv)
+    LABELS_CSV = Path(args.labels_csv)
     if args.output_dir is not None:
         RESULTS_DIR = Path(args.output_dir)
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.check_deps:
         check_dependencies()

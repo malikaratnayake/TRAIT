@@ -579,6 +579,9 @@ run_phase3_sequence_baselines() {
             mark_done "$STEP"
         else
             FCN_ARGS=(
+                --tracks-dir "$TRACKS_DIR"
+                --splits-csv "$SPLITS_CSV"
+                --labels-csv "$LABELS_CSV"
                 --max_len 512
                 --early-stop-metric pr_auc
                 --model-name FCN_PR_AUC
@@ -603,6 +606,9 @@ run_phase3_sequence_baselines() {
             mark_done "$STEP"
         else
             run_cmd "$PYTHON" src/train_rocket.py \
+                --tracks-dir "$TRACKS_DIR" \
+                --splits-csv "$SPLITS_CSV" \
+                --labels-csv "$LABELS_CSV" \
                 --max_len 512 \
                 --n-jobs "$PIPELINE_MODEL_N_JOBS" \
                 --model-name MiniROCKET_PR_AUC \
@@ -623,6 +629,9 @@ run_phase3_sequence_baselines() {
             mark_done "$STEP"
         else
             CONVTRAN_ARGS=(
+                --tracks-dir "$TRACKS_DIR"
+                --splits-csv "$SPLITS_CSV"
+                --labels-csv "$LABELS_CSV"
                 --max_len 512
                 --early-stop-metric pr_auc
                 --model-name ConvTran_PR_AUC
@@ -665,6 +674,9 @@ run_phase3_sequence_baselines() {
                 IFS=' ' read -r -a CONVTRAN_SWEEP_SIZES <<< "$CONVTRAN_BATCH_SWEEP"
                 SWEEP_ARGS=(
                     --batch-sizes "${CONVTRAN_SWEEP_SIZES[@]}"
+                    --tracks-dir "$TRACKS_DIR"
+                    --splits-csv "$SPLITS_CSV"
+                    --labels-csv "$LABELS_CSV"
                     --max_len 512
                     --early-stop-metric pr_auc
                     --output-dir "$RESULTS"

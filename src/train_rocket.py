@@ -67,11 +67,11 @@ SEED      = 42
 MAX_LEN_DEFAULT = 512
 DEFAULT_N_JOBS = int(os.environ.get("TRAIT_N_JOBS", os.environ.get("ROCKET_N_JOBS", "-1")))
 
-# Paths (relative to project root)
+# Default paths (relative to project root); overridden by the CLI options.
 TRACKS_DIR     = Path("data/tracks")
 SPLITS_CSV     = Path("data/splits_folds.csv")
-RESULTS_DIR    = Path("data/results/six_domain_v1/rocket")
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+LABELS_CSV     = Path("data/track_classification.csv")
+RESULTS_DIR    = Path("data/results/trait_results/rocket_prauc")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -286,6 +286,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
     print(f"{'='*60}\n")
 
     # ── 2. Load splits ──────────────────────────────────────────────────────
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     print("Loading splits…")
     splits = pd.read_csv(SPLITS_CSV)
     # Expected columns: fold, filename, (split_role optional)
@@ -296,7 +297,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
 
     # Ground truth labels
     try:
-        labels_df = pd.read_csv("data/track_classification.csv")
+        labels_df = pd.read_csv(LABELS_CSV)
         # Support "filepath" column (e.g. "./tracks/FarmA_...csv") as well as "filename"
         if "filename" not in labels_df.columns and "filepath" in labels_df.columns:
             labels_df["filename"] = labels_df["filepath"].apply(lambda p: Path(p).name)
@@ -307,7 +308,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, n_jobs: int = DEFAULT_N_JOBS,
             labels_df["label"] = splits["label"]
         else:
             raise FileNotFoundError(
-                "Cannot find data/track_classification.csv — "
+                f"Cannot find {LABELS_CSV} — "
                 "ensure it has columns [filename/filepath, label] where label ∈ {insect, not_insect}"
             )
 
@@ -485,7 +486,7 @@ if __name__ == "__main__":
     parser.add_argument("--check-deps", action="store_true",
                         help="Verify the aeon transformer import and exit")
     parser.add_argument("--output-dir", default=None,
-                        help="Override results directory (default: data/results/six_domain_v1/rocket)")
+                        help=f"Results directory (default: {RESULTS_DIR})")
     parser.add_argument("--n-jobs", type=int, default=DEFAULT_N_JOBS,
                         help=(
                             "Worker count for the aeon transformer. Negative values follow "
@@ -496,11 +497,19 @@ if __name__ == "__main__":
                         help="Model label written to result files")
     parser.add_argument("--limit", type=int, default=None,
                         help="Cap tracks per split (smoke-testing only)")
+    parser.add_argument("--tracks-dir", default=str(TRACKS_DIR),
+                        help=f"Directory of per-track CSVs (default: {TRACKS_DIR})")
+    parser.add_argument("--splits-csv", default=str(SPLITS_CSV),
+                        help=f"Fold assignments from create_splits.py (default: {SPLITS_CSV})")
+    parser.add_argument("--labels-csv", default=str(LABELS_CSV),
+                        help=f"Track labels with filepath and label columns (default: {LABELS_CSV})")
     args = parser.parse_args()
 
+    TRACKS_DIR = Path(args.tracks_dir)
+    SPLITS_CSV = Path(args.splits_csv)
+    LABELS_CSV = Path(args.labels_csv)
     if args.output_dir is not None:
         RESULTS_DIR = Path(args.output_dir)
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.check_deps:
         check_dependencies()
