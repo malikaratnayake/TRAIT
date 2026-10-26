@@ -10,8 +10,8 @@ src/train_convtran.py uses ConvTran's own published architecture defaults
 training-recipe choices deliberately deviate from the paper's defaults:
 batch_size=128 instead of the official 16, and AdamW instead of the
 official RAdam. Both were chosen for parity with this project's other
-sequence baselines (train_fcn.py, train_transformer.py all share the same
-training budget) rather than to reproduce ConvTran's original recipe
+sequence baselines (train_convtran.py shares train_fcn.py's training
+budget) rather than to reproduce ConvTran's original recipe
 exactly, since the official defaults were tuned for the much smaller
 UCR/UEA benchmark datasets typically used to evaluate it, not a ~23k-track
 training set.

@@ -1,78 +1,61 @@
 """
 src/train_convtran.py — ConvTran time-series classification baseline (Phase 3)
 ======================================================================================
-Faithful implementation of ConvTran (Foumani et al., "Improving position
-encoding of transformers for multivariate time series classification",
-DMKD 2024), added as a second Transformer-family baseline alongside
-src/train_transformer.py's plain encoder. Reimplemented directly from the
-architecture description and the official reference code
-(github.com/Navidfoumani/ConvTran) rather than depending on that repo, so it
-can share this project's data pipeline. Three components define ConvTran and
-are reproduced here:
+Implementation of ConvTran (Foumani et al., "Improving position encoding of
+transformers for multivariate time series classification", DMKD 2024),
+written from the architecture description and the official reference code
+(github.com/Navidfoumani/ConvTran) so it can share this project's data
+pipeline. Three components define ConvTran and are reproduced here:
 
   1. A two-stage Conv2d "disjoint CNN" input embedding: a temporal
      convolution applied independently per input channel (kernel [1, 8]),
      followed by a channel-collapsing convolution (kernel [C, 1]) that mixes
-     across channels once. This gives the tokenizer a local, convolutional
-     inductive bias that a linear input projection (as in train_transformer.py)
-     lacks — the property the ConvTran paper credits for its accuracy gains
-     on short, noisy multivariate series.
+     across channels once. This gives the tokeniser a local, convolutional
+     inductive bias that a linear input projection lacks.
   2. tAPE (time-scaled Absolute Positional Encoding): a sinusoidal encoding
      whose frequency is scaled by d_model/max_len so its resolution matches
-     the sequence length, rather than reusing NLP's default frequency
-     spacing (which the ConvTran paper shows is a poor fit for short series).
+     the sequence length.
   3. eRPE (efficient Relative Position Encoding): a learnable scalar bias
      per (query, key) relative distance, added to attention logits before
-     softmax, instead of (or in addition to) an absolute position embedding.
+     softmax.
 
-  Deliberate adaptation vs. the reference implementation: the original
-  ConvTran targets UCR/UEA benchmarks where series are already a uniform
-  length, so its attention and pooling have no notion of padding. Our tracks
-  are variable-length and zero-padded to max_len, so this version adds an
-  explicit key-padding mask to both the eRPE attention (padded keys excluded
-  via -inf before softmax) and the final pooling (masked mean instead of the
-  original's unconditional AdaptiveAvgPool1d), mirroring how train_fcn.py and
-  train_transformer.py already handle padding. The original repo is also
-  single-block by default (Net_Type='C-T': one conv-tokenizer + one eRPE
-  attention block + one feed-forward block, not a deep stack) — this is
-  preserved as the default here (--n-layers 1) rather than arbitrarily
-  matching train_transformer.py's 3-layer depth, since stacking is not part
-  of the published architecture. --n-layers is exposed for experimentation.
+  Adaptation for variable-length tracks: the original ConvTran targets
+  UCR/UEA benchmarks where series have a uniform length, so its attention and
+  pooling have no notion of padding. Our tracks are zero-padded to max_len,
+  so this version adds an explicit key-padding mask to the eRPE attention
+  (padded keys excluded via -inf before softmax) and to the final pooling
+  (masked mean instead of AdaptiveAvgPool1d), as train_fcn.py does for the
+  1D-CNN. The original is single-block by default (one conv tokeniser, one
+  eRPE attention block, one feed-forward block); this is kept as the default
+  (--n-layers 1).
 
-Uses the SAME held-out test protocol, preprocessing, and evaluation harness
-as train_fcn.py, train_rocket.py, and train_transformer.py:
+Uses the same held-out test protocol, preprocessing and evaluation harness
+as train_fcn.py and train_rocket.py:
   - Train : folds 0, 1, 2
   - Val   : fold 3  (threshold sweep + early stopping / epoch selection)
-  - Test  : fold 4  (held-out, never touched during development)
+  - Test  : fold 4  (held-out)
 
 Gap-filling, smoothing, channel construction (x_norm, y_norm, speed_norm,
-dheading), scaling, threshold selection, latency measurement, and bootstrap
-CIs are all imported from train_fcn.py, so ConvTran consumes an identical
-preprocessed trajectory to the FCN, miniROCKET, and plain Transformer
-baselines and differs only in architecture.
-
-Training budget (epochs, batch size, AdamW lr/weight decay, early-stopping
-patience) is kept identical to train_transformer.py so the three Transformer
-stages differ only in architecture / schedule, not optimisation budget. The
-LR warmup+cosine schedule (build_warmup_cosine_schedule) is reused from
-train_transformer.py; --warmup-ratio defaults to 0.0 here because the
-original ConvTran paper uses RAdam (which is warmup-free by design) and does
-not report using LR warmup — the flag is exposed for experimentation, not
-because a nonzero value is expected to be needed.
+dheading), threshold selection, latency measurement and bootstrap CIs are
+imported from train_fcn.py, so ConvTran consumes the same preprocessed
+trajectory as the 1D-CNN and miniROCKET and differs only in architecture.
 
 Architecture hyperparameters (emb_size=16, num_heads=8, dim_feedforward=256,
-dropout=0.01) are ConvTran's own published defaults, not copied from
-train_transformer.py's D_MODEL=64 — these are the values the ConvTran paper
-tuned and reports results for, so keeping them faithful is more defensible
-than forcing parameter-count parity with the plain Transformer baseline.
+dropout=0.01) are ConvTran's published defaults. The training budget (AdamW,
+lr 1e-3, weight decay 1e-4, batch size 128, at most 60 epochs, early-stopping
+patience 8) matches the 1D-CNN. The original ConvTran uses RAdam with batch
+size 16; batch size 128 is used here for parity with the 1D-CNN, and
+src/convtran_batch_size_study.py checks that the result is stable across
+batch sizes. --warmup-ratio defaults to 0 because the original reports no
+learning-rate warmup.
 
 Input :  data/tracks/          — per-track CSVs with columns [nframe, x, y]
          data/splits_folds.csv — fold assignments
-Output:  data/results/six_domain_v1/convtran/convtran_results.csv
-         data/results/six_domain_v1/convtran/convtran_predictions.csv
-         data/results/six_domain_v1/convtran/convtran_pr_curve.csv
+Output:  <output-dir>/convtran_results.csv
+         <output-dir>/convtran_predictions.csv
+         <output-dir>/<model-name>_pr_curve.csv
 
-Run from the TRAIT project root (needs PyTorch, same as train_transformer.py):
+Run from the TRAIT project root (needs PyTorch):
     python src/train_convtran.py [--max_len 512] [--epochs 60] [--check-deps]
 """
 
@@ -115,9 +98,6 @@ from src.train_fcn import (  # noqa: E402
     measure_latency,
     model_slug,
 )
-# build_warmup_cosine_schedule is a pure function (no closure over module
-# state), so it is reused rather than duplicated a second time.
-from src.train_transformer import build_warmup_cosine_schedule  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -127,7 +107,7 @@ INITIAL_MODEL_SEED = SEED
 FINAL_MODEL_SEED = SEED + 1
 
 # ConvTran architecture hyper-parameters — ConvTran's own published defaults
-# (Foumani et al., official repo main.py), not train_transformer.py's D_MODEL.
+# (Foumani et al., official repo main.py).
 EMB_SIZE        = 16
 NUM_HEADS       = 8
 N_LAYERS        = 1     # published ConvTran is single-block; override to stack
@@ -135,8 +115,7 @@ DIM_FEEDFORWARD = 256
 DROPOUT         = 0.01
 CONV_KERNEL     = 8     # temporal conv kernel width in the disjoint-CNN embedding
 
-# Training hyper-parameters — identical to train_transformer.py so the
-# three Transformer-family stages differ only in architecture / schedule.
+# Training hyper-parameters — identical to train_fcn.py's 1D-CNN.
 EPOCHS       = 60
 BATCH_SIZE   = 128
 LR           = 1e-3
@@ -155,9 +134,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 def save_pr_curve(y_true, y_score, model_name: str) -> Path:
     """Save precision-recall curve points for plotting.
 
-    Local copy (not an import) for the same reason as train_transformer.py's
-    version: importing train_fcn.py's or train_transformer.py's helper would
-    close over that module's own RESULTS_DIR and misplace this file.
+    Local copy (not an import): train_fcn.py's helper writes to train_fcn's
+    own RESULTS_DIR and would misplace this file.
     """
     precision, recall, thresholds = precision_recall_curve(y_true, y_score)
     threshold_col = np.r_[thresholds, np.nan]
@@ -180,6 +158,33 @@ def check_dependencies():
     """Verify the torch import without starting the experiment."""
     torch, _ = _import_torch()
     print(f"PyTorch dependency import OK: {torch.__version__}  ({sys.executable})")
+
+
+def build_warmup_cosine_schedule(optimizer, torch, warmup_steps: int, total_steps: int):
+    """Linear LR warmup for warmup_steps, then cosine decay to 0 over the rest.
+
+    Stepped once per optimiser step (per batch), not once per epoch — unlike
+    train_fcn.py's plain per-epoch CosineAnnealingLR, warmup needs step-level
+    granularity to ramp smoothly over the first fraction of training rather
+    than jumping in whole-epoch increments. warmup_steps and total_steps are
+    both expressed in optimiser steps (batches), computed fresh per call to
+    train_model() from that call's own epoch budget and loader length, so
+    both the initial (early-stopped) and final (fixed-epoch) training phases
+    get a schedule correctly scaled to their own step budget.
+    """
+    import math
+
+    warmup_steps = max(1, int(warmup_steps))
+    total_steps = max(warmup_steps + 1, int(total_steps))
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(total_steps - warmup_steps)
+        progress = min(1.0, progress)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 # ─── ConvTran model ─────────────────────────────────────────────────────────
@@ -294,7 +299,7 @@ def build_convtran(in_channels: int, max_len: int, nn, *,
             super().__init__()
             # Disjoint-CNN tokeniser: temporal conv per channel, then a
             # single channel-mixing conv — the local inductive bias that a
-            # plain linear projection (train_transformer.py) lacks.
+            # plain linear projection lacks.
             self.embed1 = nn.Sequential(
                 nn.Conv2d(1, emb_size * 4, kernel_size=(1, conv_kernel), padding="same"),
                 nn.BatchNorm2d(emb_size * 4),
@@ -485,8 +490,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
     def predict_proba(model, X, L):
         # Small eval chunk (not FCN's 1024): self-attention memory scales
         # with batch_size * n_heads * max_len^2, so a large eval chunk at
-        # max_len=512 can spike memory even under no_grad(). Same fix as
-        # train_transformer.py.
+        # max_len=512 can spike memory even under no_grad().
         model.eval()
         out = []
         eval_chunk = max(1, min(batch_size, 64))
@@ -533,7 +537,7 @@ def run(max_len: int = MAX_LEN_DEFAULT, epochs: int = EPOCHS, batch_size: int = 
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
-                sched.step()  # per-step: consistent with train_transformer.py
+                sched.step()  # stepped per batch, not per epoch
             if val_X is not None:
                 vp = predict_proba(model, val_X, val_L)
                 if early_stop_metric == "pr_auc":
