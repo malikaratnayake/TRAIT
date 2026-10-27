@@ -9,7 +9,17 @@ authors:
   - family-names: Dorin
     given-names: Alan
     affiliation: Monash University
+license: GPL-3.0-only
 repository-code: "https://github.com/malikaratnayake/TRAIT"
+references:
+  - type: dataset
+    title: "TRAIT dataset: annotated insect and non-insect camera-trap trajectories"
+    doi: "10.26180/32737458"
+    authors:
+      - family-names: Ratnayake
+        given-names: Malika Nisal
+      - family-names: Dorin
+        given-names: Alan
 keywords:
   - insect detection
   - trajectory classification

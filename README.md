@@ -57,7 +57,7 @@ of the source present for more than 50% of its duration.
 
 ### Download
 
-The dataset is published on Figshare under CC BY 4.0: **[Figshare DOI — to be added]**.
+The dataset is published on Figshare under CC BY 4.0: [doi:10.26180/32737458](https://doi.org/10.26180/32737458).
 Download `TRAIT_dataset.zip` and extract it into `data/` so the layout is:
 
 ```
@@ -356,5 +356,5 @@ Costa Group.
 
 ## License
 
-- Code: **[to be added]**
+- Code: GNU General Public License v3.0 (see `LICENSE`)
 - Dataset: CC BY 4.0
