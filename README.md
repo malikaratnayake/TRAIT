@@ -13,12 +13,12 @@ a classifier to distinguish **insect** from **not insect**. The input is a seque
 centroid positions and frame numbers, so classification works from tracks already
 extracted by a tracking system. A CPU is enough to run the toolkit.
 
-You can use the feature extractor on its own, train a classifier on labelled tracks, or
-run the experiments from our WACV 2027 paper:
+You can use the feature extractor on its own, train a classifier on your own labelled
+tracks, or reproduce the experiments of the accompanying paper:
 
-**Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps**
-
-Malika Nisal Ratnayake and Alan Dorin
+> Malika Nisal Ratnayake and Alan Dorin.
+> **Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps.**
+> *IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)*, 2027.
 
 [Dataset](https://doi.org/10.26180/32737458) ·
 [Reproduction guide](docs/REPRODUCING_THE_PAPER.md)
