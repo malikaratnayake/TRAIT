@@ -36,9 +36,9 @@ Usage
 -----
   python src/compare_results.py \\
       --run       data/results/paper \\
-      --reference TRAIT_paper_results \\
+      --reference WACV2027_paper_results \\
       [--features] [--splits-run data/splits_folds.csv \\
-                    --splits-reference TRAIT_paper_results/splits_folds.csv] \\
+                    --splits-reference WACV2027_paper_results/splits_folds.csv] \\
       [--tol 0.0005] [--details-csv comparison.csv]
 """
 

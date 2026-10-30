@@ -58,7 +58,8 @@ of the source present for more than 50% of its duration.
 ### Download
 
 The dataset is published on Figshare under CC BY 4.0: [doi:10.26180/32737458](https://doi.org/10.26180/32737458).
-Download `TRAIT_dataset.zip` and extract it into `data/` so the layout is:
+Download `tracks.zip`, `track_classification.csv` and `splits_folds.csv`, put the two CSV
+files in `data/` and extract `tracks.zip` there, so the layout is:
 
 ```
 data/
@@ -67,8 +68,11 @@ data/
 └── splits_folds.csv           # the five-fold assignment used in the paper
 ```
 
-The archive also contains a README describing the data and a SHA-256 checksum for every
-file.
+The Figshare record also has `README.txt`, which describes the data (files, columns,
+collection, labelling, splits, limitations), and `SHA256SUMS.txt` with a checksum of every
+file. A copy of the same files, `TRAIT_dataset.zip`, is attached to the
+[`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027) for
+convenience; the Figshare record is the one to cite.
 
 ### File naming
 
@@ -211,7 +215,7 @@ Held-out test set (fold 4, 5,456 tracks, 14.6% insect). Latencies depend on the 
 
 The outputs of the run reported in the paper are attached to the
 [`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027) as
-`TRAIT_paper_results.zip`. They include every table, the per-track test predictions of
+`WACV2027_paper_results.zip`. They include every table, the per-track test predictions of
 each model, the feature table, the fitted LR, Random Forest and XGBoost models, and the
 outputs of the two supplementary studies, in the same layout as a run folder.
 
@@ -220,9 +224,9 @@ To check your own run against them, unzip the archive and run:
 ```bash
 python src/compare_results.py \
     --run       data/results/paper \
-    --reference TRAIT_paper_results \
+    --reference WACV2027_paper_results \
     --features \
-    --splits-run data/splits_folds.csv --splits-reference TRAIT_paper_results/splits_folds.csv
+    --splits-run data/splits_folds.csv --splits-reference WACV2027_paper_results/splits_folds.csv
 ```
 
 It compares every value behind the paper's tables, each model's per-track test scores, the
