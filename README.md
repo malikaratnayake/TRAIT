@@ -1,35 +1,134 @@
 # TRAIT — Trajectory Recognition for Automated Insect Tagging
 
-TRAIT classifies 2D centroid tracks from camera traps as **insect** or **not insect** using
-only motion. Each track is gap-filled and smoothed, described by 125 interpretable,
-behaviour-informed motion features organised into six domains, and classified with
-XGBoost. No appearance information, image data or GPU is required.
+[![Dataset DOI](https://img.shields.io/badge/dataset%20DOI-10.26180%2F32737458-blue)](https://doi.org/10.26180/32737458)
+[![Code licence: GPL-3.0](https://img.shields.io/badge/code%20licence-GPL--3.0-blue.svg)](LICENSE)
+[![Data licence: CC BY 4.0](https://img.shields.io/badge/data%20licence-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
+[![Paper: WACV 2027](https://img.shields.io/badge/paper-WACV%202027-green.svg)](#citation)
+[![Release: wacv2027](https://img.shields.io/badge/release-wacv2027-orange.svg)](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027)
 
-This repository contains the code and instructions to reproduce all results in:
+TRAIT is a Python toolkit that decides whether a camera-trap track is an **insect** or
+**not an insect** from its motion alone. It takes the `(frame, x, y)` centroid track of a
+moving object, describes it with **125 interpretable, behaviour-informed motion features**
+in six domains, and classifies it with a lightweight model that runs on a CPU. It needs no
+images and no GPU.
 
-> Malika Nisal Ratnayake and Alan Dorin.
-> **Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps.**
-> *IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)*, 2027.
+TRAIT can be used to:
 
-On a held-out, station-disjoint test set, XGBoost on the 125 features reaches
-**PR-AUC 0.929** and **F1 0.866** at 0.53 ms per track on a single CPU thread, ahead of the
-1D-CNN, miniROCKET and ConvTran sequence baselines trained on the same trajectories.
+- remove false detections (wind-blown vegetation, shadows, camera shake) from the output of
+  an insect tracking or detection system;
+- compute interpretable flight and movement features for ecological or behavioural analysis;
+- train and compare trajectory classifiers on a labelled dataset with station-disjoint
+  splits and cross-farm tests.
+
+The repository includes the code for every step (features, splits, classifiers, ablations,
+figures), a pipeline script that runs them end to end, and a tool for comparing a run with
+the results of the accompanying paper (see [Citation](#citation)). The dataset of 28,295
+annotated tracks is published separately on Figshare.
 
 ---
 
 ## Contents
 
+- [What is in the toolkit](#what-is-in-the-toolkit)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Using TRAIT on your own tracks](#using-trait-on-your-own-tracks)
 - [Dataset](#dataset)
 - [Method overview](#method-overview)
-- [Installation](#installation)
+- [Repository structure](#repository-structure)
 - [Reproducing the paper](#reproducing-the-paper)
 - [Comparing with the published results](#comparing-with-the-published-results)
 - [Where each result comes from](#where-each-result-comes-from)
 - [Supplementary studies](#supplementary-studies)
-- [Repository structure](#repository-structure)
 - [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
 - [License](#license)
+
+---
+
+## What is in the toolkit
+
+| Component | What it does | Script |
+|---|---|---|
+| Preprocessing | Fills gaps in tracks by linear interpolation and smooths them (Savitzky–Golay) | `src/utils/smoothing.py` |
+| Feature extraction | Computes the 125 motion features for every track | `src/generate_features.py` |
+| Data splits | Builds station-disjoint cross-validation folds, so no camera station is in both training and test data | `src/create_splits.py` |
+| Classifiers | Logistic Regression, Random Forest and XGBoost on the features; 1D-CNN, miniROCKET and ConvTran on the raw trajectories | `src/models/`, `src/train_*.py` |
+| Generalisation and ablation | Within- and cross-farm evaluation; domain, subgroup and feature-level ablations | `src/cross_farm.py`, `src/ablation.py` |
+| Pipeline | Runs all of the above end to end, with checkpoints so it can be resumed | `run_pipeline.sh` |
+| Comparison | Checks a run against the published results | `src/compare_results.py` |
+
+---
+
+## Installation
+
+Python 3.10 or later is required. The pinned versions in `requirements.txt` are the
+versions used for the paper.
+
+```bash
+git clone https://github.com/malikaratnayake/TRAIT.git
+cd TRAIT
+python3.10 -m venv trait-env
+source trait-env/bin/activate          # Windows: trait-env\Scripts\activate
+python -m pip install -r requirements.txt
+```
+
+Check that every dependency imports:
+
+```bash
+python -c "import numpy, scipy, pandas, sklearn, xgboost, matplotlib, torch, aeon; print('OK')"
+```
+
+If pip cannot find SciPy 1.15.3, the environment is using Python 3.9 or older. Recreate
+it with Python 3.10 or later.
+
+---
+
+## Quick start
+
+1. Download the dataset ([see Dataset](#dataset)) into `data/`.
+2. Run the pipeline:
+
+```bash
+bash run_pipeline.sh --fps 30 --run-name my_run
+```
+
+Results are written to `data/results/my_run/`: the feature table, the model comparison, the
+cross-farm and ablation results, and figures. Each step writes a checkpoint when it
+finishes, so an interrupted run can be restarted with the same command. Use `--dry-run` to
+print the commands without running them, and `-h` to list all options.
+
+---
+
+## Using TRAIT on your own tracks
+
+**Input.** One CSV file per track with the columns `nframe,x,y` (frame number and centroid
+in pixels; `x` and `y` may be empty in frames without a detection), and a labels CSV in the
+format of `track_classification.csv` (columns `filepath,label`, with `insect` or
+`not_insect`).
+
+**Extract the 125 features** for all tracks:
+
+```bash
+python src/generate_features.py \
+    --tracks-dir path/to/tracks \
+    --labels-csv path/to/labels.csv \
+    --fps        30 \
+    --output-csv features.csv
+```
+
+The output has one row per track with its label and the 125 features. Gap filling and
+smoothing are done inside the script. The feature names, domains and subgroups are declared
+in `src/models/data_loader.py`, and their equations are in the supplementary material of the
+paper. The features can then be used with any classifier, or with the training code in
+`src/models/`.
+
+The station-disjoint splits and the full pipeline (`src/create_splits.py`,
+`run_pipeline.sh`) read the camera station from the track file name (see
+[File naming](#file-naming)). To use them on other data, name the files in the same pattern
+or adapt `src/utils/metadata.py`. The pipeline can also be pointed at other folders with
+`--tracks-dir`, `--labels-csv`, `--features-csv` and `--splits-csv`.
 
 ---
 
@@ -125,33 +224,52 @@ They are used to build station-disjoint splits but are never used as model input
 
 ---
 
-## Installation
+## Repository structure
 
-Python 3.10 or later is required. The pinned versions in `requirements.txt` are the
-versions used for the paper.
-
-```bash
-git clone https://github.com/malikaratnayake/TRAIT.git
-cd TRAIT
-python3.10 -m venv trait-env
-source trait-env/bin/activate          # Windows: trait-env\Scripts\activate
-python -m pip install -r requirements.txt
+```
+TRAIT/
+├── run_pipeline.sh                     # Runs the full pipeline (Phases 1–5)
+├── clean.sh                            # Deletes one run folder (dry run unless --confirm)
+├── requirements.txt                    # Pinned dependencies used for the paper
+├── CITATION.cff                        # How to cite this software and the paper
+├── LICENSE                             # GPL-3.0
+├── data/                               # Put the downloaded dataset here
+└── src/
+    ├── generate_features.py            # Phase 1: gap filling, smoothing, 125 features
+    ├── create_splits.py                # Phase 2: station-disjoint five-fold splits
+    ├── models/
+    │   ├── data_loader.py              # Feature hierarchy (6 domains, 32 subgroups), data loading
+    │   ├── evaluate.py                 # Metrics, bootstrap confidence intervals, latency
+    │   ├── majority_baseline.py        # Majority-class baseline
+    │   └── tabular_models.py           # Logistic Regression, Random Forest, XGBoost
+    ├── train_fcn.py                    # 1D-CNN (FCN) and shared sequence preprocessing
+    ├── train_rocket.py                 # miniROCKET
+    ├── train_convtran.py               # ConvTran
+    ├── cross_farm.py                   # Phase 4: within- and cross-farm evaluation
+    ├── ablation.py                     # Phase 5: ablations and permutation importance
+    ├── operating_points.py             # XGBoost operating points (Supp. Table 10)
+    ├── cross_farm_threshold_study.py   # Threshold robustness (Supp. Table 9)
+    ├── convtran_batch_size_study.py    # ConvTran batch-size sweep (Supp. Table 11)
+    ├── compare_results.py              # Compares a run with the published results
+    ├── figures/
+    │   ├── plot_session_trajectories.py        # Figure 2
+    │   ├── plot_class_trajectory_overlays.py   # Figure 3
+    │   ├── plot_pr_curves.py                   # Figure 4
+    │   └── plot_group_loo.py                   # Supp. Figure 1
+    └── utils/
+        ├── smoothing.py                # Gap filling and Savitzky–Golay smoothing
+        └── metadata.py                 # Parses farm, location and station from file names
 ```
 
-Check that every dependency imports before starting a long run:
-
-```bash
-python -c "import numpy, scipy, pandas, sklearn, xgboost, matplotlib, torch, aeon; print('OK')"
-```
-
-If pip cannot find SciPy 1.15.3, the environment is using Python 3.9 or older. Recreate
-it with Python 3.10 or later.
+To start a run again from scratch, delete its folder with `bash clean.sh <run-name> --confirm`
+(without `--confirm` it only lists what would be deleted). It never touches the dataset, the
+split files or run folders that contain read-only files.
 
 ---
 
 ## Reproducing the paper
 
-Run the whole pipeline in deterministic mode, as used for the paper:
+The results reported in the paper come from running the pipeline in deterministic mode:
 
 ```bash
 bash run_pipeline.sh --fps 30 --test-run --run-name paper
@@ -171,9 +289,6 @@ PR-AUC by up to 0.004 in our tests).
 
 Phase 2 regenerates `data/splits_folds.csv` and `data/split_statistics.csv`; the regenerated
 fold assignment is identical to the one in the dataset download.
-
-Each step writes a checkpoint when it finishes. Re-running the same command skips
-completed steps, so an interrupted run can simply be restarted.
 
 | Option | Effect |
 |---|---|
@@ -195,9 +310,10 @@ The pipeline has five phases:
 | 4 | Within-farm and cross-farm generalisation (XGBoost) | `src/cross_farm.py` |
 | 5 | Domain, subgroup and feature-level ablations; trajectory figures | `src/ablation.py`, `src/figures/` |
 
-### Expected results
+### Reported results
 
-Held-out test set (fold 4, 5,456 tracks, 14.6% insect). Latencies depend on the hardware.
+Model comparison on the held-out test set of the paper (fold 4, 5,456 tracks, 14.6% insect), for
+checking a reproduction. Latencies depend on the hardware.
 
 | Model | PR-AUC (95% CI) | τ | F1 | Recall | Precision | Latency (ms) |
 |---|---|---:|---:|---:|---:|---:|
@@ -292,48 +408,6 @@ bash run_pipeline.sh --fps 30 --test-run --run-name paper --from-phase 3 \
 
 ---
 
-## Repository structure
-
-```
-TRAIT/
-├── run_pipeline.sh                     # Runs the full pipeline (Phases 1–5)
-├── clean.sh                            # Deletes one run folder (dry run unless --confirm)
-├── requirements.txt                    # Pinned dependencies used for the paper
-├── CITATION.cff                        # How to cite this software and the paper
-├── data/                               # Put the downloaded dataset here
-└── src/
-    ├── generate_features.py            # Phase 1: gap filling, smoothing, 125 features
-    ├── create_splits.py                # Phase 2: station-disjoint five-fold splits
-    ├── models/
-    │   ├── data_loader.py              # Feature hierarchy (6 domains, 32 subgroups), data loading
-    │   ├── evaluate.py                 # Metrics, bootstrap confidence intervals, latency
-    │   ├── majority_baseline.py        # Majority-class baseline
-    │   └── tabular_models.py           # Logistic Regression, Random Forest, XGBoost
-    ├── train_fcn.py                    # 1D-CNN (FCN) and shared sequence preprocessing
-    ├── train_rocket.py                 # miniROCKET
-    ├── train_convtran.py               # ConvTran
-    ├── cross_farm.py                   # Phase 4: within- and cross-farm evaluation
-    ├── ablation.py                     # Phase 5: ablations and permutation importance
-    ├── operating_points.py             # XGBoost operating points (Supp. Table 10)
-    ├── cross_farm_threshold_study.py   # Threshold robustness (Supp. Table 9)
-    ├── convtran_batch_size_study.py    # ConvTran batch-size sweep (Supp. Table 11)
-    ├── compare_results.py              # Compares a run with the published results
-    ├── figures/
-    │   ├── plot_session_trajectories.py        # Figure 2
-    │   ├── plot_class_trajectory_overlays.py   # Figure 3
-    │   ├── plot_pr_curves.py                   # Figure 4
-    │   └── plot_group_loo.py                   # Supp. Figure 1
-    └── utils/
-        ├── smoothing.py                # Gap filling and Savitzky–Golay smoothing
-        └── metadata.py                 # Parses farm, location and station from file names
-```
-
-To start a run again from scratch, delete its folder with `bash clean.sh <run-name> --confirm`
-(without `--confirm` it only lists what would be deleted). It never touches the dataset, the
-split files or run folders that contain read-only files.
-
----
-
 ## Citation
 
 If you use the code or dataset, please cite the paper (GitHub's "Cite this repository"
@@ -347,6 +421,12 @@ button uses `CITATION.cff`):
   year      = {2027}
 }
 ```
+
+and the dataset: Ratnayake, M. N. and Dorin, A. (2026). *TRAIT: Annotated Insect and
+Non-Insect Trajectories from Camera Traps*. Monash University. Dataset.
+https://doi.org/10.26180/32737458
+
+Questions and bug reports are welcome as [GitHub issues](https://github.com/malikaratnayake/TRAIT/issues).
 
 ---
 
