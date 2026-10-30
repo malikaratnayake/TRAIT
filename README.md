@@ -7,24 +7,41 @@
 [![Paper: WACV 2027](https://img.shields.io/badge/paper-WACV%202027-green.svg)](#citation)
 [![Release: wacv2027](https://img.shields.io/badge/release-wacv2027-orange.svg)](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027)
 
-TRAIT is a Python toolkit that decides whether a camera-trap track is an **insect** or
-**not an insect** from its motion alone. It takes the `(frame, x, y)` centroid track of a
-moving object, describes it with **125 interpretable, behaviour-informed motion features**
-in six domains, and classifies it with a lightweight model that runs on a CPU. It needs no
-images and no GPU.
+TRAIT is a Python toolkit for recognising insect movement from 2D tracks. It describes
+how an object moves using **125 interpretable, behaviour-informed features**, then uses
+a classifier to distinguish **insect** from **not insect**. The input is a sequence of
+centroid positions and frame numbers, so classification works from tracks already
+extracted by a tracking system. A CPU is enough to run the toolkit.
+
+You can use the feature extractor on its own, train a classifier on labelled tracks, or
+run the experiments from our WACV 2027 paper:
+
+**Detecting Insect Flight Trajectories for Pollinator Monitoring with Camera Traps**
+
+Malika Nisal Ratnayake and Alan Dorin
+
+[Dataset](https://doi.org/10.26180/32737458) ·
+[Reproduction guide](docs/REPRODUCING_THE_PAPER.md)
 
 TRAIT can be used to:
 
-- remove false detections (wind-blown vegetation, shadows, camera shake) from the output of
-  an insect tracking or detection system;
+- filter tracks caused by background movement, such as wind-blown vegetation, shadows
+  and camera shake;
 - compute interpretable flight and movement features for ecological or behavioural analysis;
 - train and compare trajectory classifiers on a labelled dataset with station-disjoint
   splits and cross-farm tests.
 
-The repository includes the code for every step (features, splits, classifiers, ablations,
-figures), a pipeline script that runs them end to end, and a tool for comparing a run with
-the results of the accompanying paper (see [Citation](#citation)). The dataset of 28,295
-annotated tracks is published separately on Figshare.
+The repository brings together preprocessing, feature extraction, model training,
+evaluation and plotting. The full dataset of 28,295 annotated tracks is available on
+Figshare; two example tracks are included here to help you get started.
+
+```mermaid
+flowchart LR
+    T["2D tracks"] --> P["Fill gaps and smooth"]
+    P --> F["125 motion features"]
+    F --> M["Classifier"]
+    M --> L["Insect / not insect"]
+```
 
 ---
 
@@ -34,6 +51,7 @@ annotated tracks is published separately on Figshare.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Using TRAIT on your own tracks](#using-trait-on-your-own-tracks)
+- [Scope and limitations](#scope-and-limitations)
 - [Dataset](#dataset)
 - [Method overview](#method-overview)
 - [Reproducing the paper](#reproducing-the-paper)
@@ -50,7 +68,7 @@ annotated tracks is published separately on Figshare.
 | Preprocessing | Fills gaps in tracks by linear interpolation and smooths them (Savitzky–Golay) | `src/utils/smoothing.py` |
 | Feature extraction | Computes the 125 motion features for every track | `src/generate_features.py` |
 | Data splits | Builds station-disjoint cross-validation folds, so no camera station is in both training and test data | `src/create_splits.py` |
-| Classifiers | Logistic Regression, Random Forest and XGBoost on the features; 1D-CNN, miniROCKET and ConvTran on the raw trajectories | `src/models/`, `src/train_*.py` |
+| Classifiers | Logistic Regression, Random Forest and XGBoost on the features; 1D-CNN, miniROCKET and ConvTran on preprocessed trajectories | `src/models/`, `src/train_*.py` |
 | Generalisation and ablation | Within- and cross-farm evaluation; domain, subgroup and feature-level ablations | `src/cross_farm.py`, `src/ablation.py` |
 | Pipeline | Runs all of the above end to end, with checkpoints so it can be resumed | `run_pipeline.sh` |
 | Comparison | Checks a run against the published results | `src/compare_results.py` |
@@ -59,8 +77,8 @@ annotated tracks is published separately on Figshare.
 
 ## Installation
 
-Python 3.10 or later is required. The pinned versions in `requirements.txt` are the
-versions used for the paper.
+Python 3.10 or later is required; use **Python 3.10** to reproduce the paper.
+The package versions in `requirements.txt` match those used for the reported experiments.
 
 ```bash
 git clone https://github.com/malikaratnayake/TRAIT.git
@@ -70,39 +88,63 @@ source trait-env/bin/activate          # Windows: trait-env\Scripts\activate
 python -m pip install -r requirements.txt
 ```
 
-Check that every dependency imports:
+Check the main dependencies:
 
 ```bash
-python -c "import numpy, scipy, pandas, sklearn, xgboost, matplotlib, torch, aeon; print('OK')"
+python -c "import numpy, scipy, pandas, sklearn, xgboost, joblib, matplotlib, torch, aeon, numba; print('OK')"
 ```
 
-If pip cannot find SciPy 1.15.3, the environment is using Python 3.9 or older. Recreate
-it with Python 3.10 or later.
+If a pinned package cannot be installed, check `python --version` first. Python 3.10
+is the best starting point for resolving version compatibility problems. The pipeline
+commands below use Bash; on Windows, run them in a Bash environment such as WSL.
 
 ---
 
 ## Quick start
 
-1. Download the dataset ([see Dataset](#dataset)) into `data/`.
-2. Run the pipeline:
+Try feature extraction on the two included tracks first. This checks the input format
+and feature calculations without downloading the full dataset or training any models:
+
+```bash
+python src/generate_features.py \
+    --tracks-dir examples/tracks \
+    --labels-csv examples/labels.csv \
+    --fps 30 \
+    --output-csv data/results/example/track_features.csv
+```
+
+You should see two processed tracks and 125 features per track. Some features can be
+undefined for an individual track and appear as empty cells in the output.
+The [example notes](examples/README.md) describe the source data.
+
+When you are ready to train and evaluate models, [download the full dataset](#dataset)
+into `data/` and run:
 
 ```bash
 bash run_pipeline.sh --fps 30 --run-name my_run
 ```
 
 Results are written to `data/results/my_run/`: the feature table, the model comparison, the
-cross-farm and ablation results, and figures. Each step writes a checkpoint when it
-finishes, so an interrupted run can be restarted with the same command. Use `--dry-run` to
-print the commands without running them, and `-h` to list all options.
+cross-farm and ablation results, and figures. This runs the full experimental pipeline,
+including the sequence baselines, so it takes substantially longer than the example.
+Each completed step is checkpointed; use the same command to resume an interrupted run.
+Use `--dry-run` to preview the commands and `-h` to see the options. For the configuration
+used in the paper, follow [Reproducing the paper](#reproducing-the-paper).
 
 ---
 
 ## Using TRAIT on your own tracks
 
-**Input.** One CSV file per track with the columns `nframe,x,y` (frame number and centroid
-in pixels; `x` and `y` may be empty in frames without a detection), and a labels CSV in the
-format of `track_classification.csv` (columns `filepath,label`, with `insect` or
-`not_insect`).
+Start with one CSV file per track, with columns `nframe,x,y`: an integer frame number
+and centroid coordinates in pixels. Keep rows in time order, with one row for every
+frame between the start and end of the track. Leave `x` and `y` empty for a missed
+detection. If your tracker omits those frames entirely, insert the missing rows first:
+gap filling operates on row positions and assumes evenly spaced frames.
+
+Put the track CSVs directly in one folder and list them in a labels CSV with columns
+`filepath,label`. Use `insect` or `not_insect` for the labels; `filepath` can be just
+the filename, as in [examples/labels.csv](examples/labels.csv). Use the actual recording
+frame rate in `--fps`; the dataset supplied with this project uses 30 fps.
 
 **Extract the 125 features** for all tracks:
 
@@ -114,17 +156,34 @@ python src/generate_features.py \
     --output-csv features.csv
 ```
 
-The output has one row per track with its label and the 125 features. Gap filling and
-smoothing are done inside the script. The feature names, domains and subgroups are declared
-in `src/models/data_loader.py`, and their equations are in the supplementary material of the
-paper. The features can then be used with any classifier, or with the training code in
-`src/models/`.
+The output has one row per processed track, with its filename, binary label
+(`1` for insect, `0` for not insect) and 125 features. The script fills gaps and smooths
+the coordinates before extracting features. Feature names and groupings are defined in
+`src/models/data_loader.py`; the supplementary material of the paper
+gives their equations. You can use the feature table in your own analysis or with the
+training code in `src/models/`. Missing feature values are filled from training-set
+medians by the supplied model code.
 
 The station-disjoint splits and the full pipeline (`src/create_splits.py`,
 `run_pipeline.sh`) read the camera station from the track file name (see
-[the file naming](docs/REPRODUCING_THE_PAPER.md#file-naming)). To use them on other data, name the files in the same pattern
-or adapt `src/utils/metadata.py`. The pipeline can also be pointed at other folders with
-`--tracks-dir`, `--labels-csv`, `--features-csv` and `--splits-csv`.
+[the naming convention](docs/REPRODUCING_THE_PAPER.md#file-naming)). To use them on
+other data, follow the same pattern or adapt `src/utils/metadata.py`. The pipeline can
+also use other folders through `--tracks-dir`, `--labels-csv`, `--features-csv` and
+`--splits-csv`.
+
+---
+
+## Scope and limitations
+
+TRAIT classifies movement in existing tracks. Its current labels distinguish insects
+from other motion; they do not identify species or establish whether an insect is a
+pollinator. The published evaluation covers two blueberry farms. Performance in other
+habitats and camera setups needs to be checked on representative data.
+
+Frame rate, camera distance, resolution and tracking quality can all affect the features.
+For a new recording setup, evaluate the classifier on representative labelled tracks
+and choose its decision threshold using validation data. Keep tracks from the same
+camera station or recording group together when splitting data for evaluation.
 
 ---
 
@@ -175,18 +234,24 @@ Full details, the feature domains and the repository layout are in
 
 ## Reproducing the paper
 
-All results in the paper can be reproduced with
+For a reproduction, use the source archive from the
+[`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027),
+or check out that tag in a clean clone before installing the dependencies. The default
+branch may contain later changes.
+
+The main experiments and ablations use deterministic, single-threaded CPU execution:
 
 ```bash
 bash run_pipeline.sh --fps 30 --test-run --run-name paper
 ```
 
-The published outputs are attached to the
+The reference outputs are attached to the
 [`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027) as
-`WACV2027_paper_results.zip`, and `src/compare_results.py` checks a run against them.
-Options, expected results, the mapping from paper tables and figures to output files, and
-the supplementary studies are in
-[docs/REPRODUCING_THE_PAPER.md](docs/REPRODUCING_THE_PAPER.md).
+`WACV2027_paper_results.zip`. Use `src/compare_results.py` to compare the saved metrics
+and predictions with your own run. The threshold-robustness study and ConvTran batch-size
+study need [two additional commands](docs/REPRODUCING_THE_PAPER.md#supplementary-studies).
+The [reproduction guide](docs/REPRODUCING_THE_PAPER.md) covers comparison options,
+computing requirements and the output files behind each table and figure.
 
 ---
 

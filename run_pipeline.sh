@@ -30,7 +30,7 @@
 # Options:
 #   --fps FLOAT          Frames per second for feature extraction [required on
 #                        first run; cached in RESULTS/pipeline.cfg afterwards]
-#   --from-phase N       Restart from phase N (1–5)
+#   --from-phase N       Start at phase N (1–5), honouring existing checkpoints
 #   --results-dir PATH   Use an explicit results directory
 #   --run-name NAME      Save results under data/results/<NAME>/
 #   --overwrite-results  Remove the selected results directory and re-run
@@ -64,8 +64,9 @@
 #
 # Checkpoints:
 #   Each completed step writes RESULTS/ckpts/<step>.done, and re-running the
-#   script skips completed steps. Use --from-phase N or --overwrite-results to
-#   re-run.
+#   script skips completed steps. --from-phase N skips earlier phases but keeps
+#   these checkpoints. Use a new --run-name for a fresh run, or
+#   --overwrite-results to replace the selected run.
 # =============================================================================
 
 set -euo pipefail

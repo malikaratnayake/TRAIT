@@ -1,8 +1,15 @@
 # Reproducing the paper
 
-Detailed instructions for reproducing, and comparing with, the results of *Detecting Insect
-Flight Trajectories for Pollinator Monitoring with Camera Traps* (WACV 2027). For an
-introduction to TRAIT and for using it on your own data, see the [README](../README.md).
+This guide walks through the experiments in *Detecting Insect Flight Trajectories for
+Pollinator Monitoring with Camera Traps* (WACV 2027), from downloading the tracks to
+comparing your results with the reference run.
+
+[Dataset](https://doi.org/10.26180/32737458)
+
+For installation, a small working example or guidance on your own tracks, start with
+the [README](../README.md). The standard pipeline covers the main experiments,
+ablations and operating points. Two additional studies from the supplement are
+[run separately](#supplementary-studies).
 
 ## Contents
 
@@ -10,6 +17,8 @@ introduction to TRAIT and for using it on your own data, see the [README](../REA
 - [Method overview](#method-overview)
 - [Repository structure](#repository-structure)
 - [Running the pipeline](#running-the-pipeline)
+- [Computing requirements and reproducibility](#computing-requirements-and-reproducibility)
+- [Reported results](#reported-results)
 - [Comparing with the published results](#comparing-with-the-published-results)
 - [Where each result comes from](#where-each-result-comes-from)
 - [Supplementary studies](#supplementary-studies)
@@ -72,14 +81,18 @@ FarmA_L1_S10_250729_093716_100005000023.csv
 The farm, location and station together (`FarmA_L1_S10`) identify a camera station.
 They are used to build station-disjoint splits but are never used as model inputs.
 
+Track rows follow consecutive frame numbers in time order, with empty coordinates for
+missed detections. This matters because the preprocessing code interpolates over row
+positions. For another track format, insert any omitted frame rows before running it.
+
 ---
 
 ## Method overview
 
-1. **Gap filling and smoothing.** Missed detections are filled by linear interpolation
-   over the frame index. Tracks shorter than five frames were excluded when the dataset
-   was built (the shortest released track has 10 points). Coordinates are then smoothed with a Savitzky–Golay filter (11-frame window, polynomial order 2). For
-   shorter tracks the largest valid odd window is used.
+1. **Gap filling and smoothing.** Missing coordinates are filled by linear interpolation
+   along the consecutive frame rows. Tracks shorter than five frames were excluded when
+   the dataset was built. Coordinates are then smoothed with a Savitzky–Golay filter
+   (11-frame window, polynomial order 2). Shorter tracks use the largest valid odd window.
 2. **Feature extraction.** 125 features in six domains and 32 subgroups are computed from
    the smoothed track. The wingbeat-residual features also use the raw coordinates.
    Full definitions and equations are in Section 1 of the supplementary material, and
@@ -96,9 +109,9 @@ They are used to build station-disjoint splits but are never used as model input
 
 3. **Station-disjoint evaluation.** Tracks are split into five folds with
    `StratifiedGroupKFold`, grouped by camera station and stratified by farm location and
-   class. A deterministic seed search over 100 candidates selects the most balanced split
-   (`random_state = 47`). Fold 4 is the held-out test set. It is used once for final
-   evaluation and never for model selection, early stopping or threshold tuning.
+   class. A deterministic search over seeds 0–99 selects the most balanced split
+   (selected seed 47). Fold 4 is reserved for final evaluation, with model selection,
+   early stopping and deployed threshold selection carried out on folds 0–3.
 4. **Classification.** Logistic Regression, Random Forest and XGBoost are trained on the
    features. The 1D-CNN (FCN), miniROCKET and ConvTran baselines are trained on the same
    gap-filled, smoothed trajectories, using four channels (normalised x, y and speed, and
@@ -117,6 +130,7 @@ TRAIT/
 ├── requirements.txt                    # Pinned dependencies used for the paper
 ├── CITATION.cff                        # How to cite this software and the paper
 ├── LICENSE                             # GPL-3.0
+├── examples/                           # Two labelled tracks for a small first run
 ├── data/                               # Put the downloaded dataset here
 └── src/
     ├── generate_features.py            # Phase 1: gap filling, smoothing, 125 features
@@ -153,7 +167,20 @@ split files or run folders that contain read-only files.
 
 ## Running the pipeline
 
-The results reported in the paper come from running the pipeline in deterministic mode:
+Use the source archive from the
+[`wacv2027` release](https://github.com/malikaratnayake/TRAIT/releases/tag/wacv2027)
+for the paper version, or select the tag in a clean clone before installing the
+[pinned dependencies](../requirements.txt):
+
+```bash
+git checkout wacv2027
+```
+
+Use Python 3.10, as in the paper. For later runs, keep a note of the commit returned by
+`git rev-parse HEAD` alongside your results. This helps distinguish changes in the code
+from differences in the computing environment.
+
+Run the main experiments and ablations in deterministic mode:
 
 ```bash
 bash run_pipeline.sh --fps 30 --test-run --run-name paper
@@ -161,15 +188,9 @@ bash run_pipeline.sh --fps 30 --test-run --run-name paper
 
 Outputs are written to `data/results/paper/`. `--test-run` runs every model on one CPU
 thread, uses deterministic PyTorch with seed 42, and keeps the 1D-CNN and ConvTran on the
-CPU. This is the configuration behind the reported results and latencies. It is slow, so
-plan for a long run. Without `--test-run`, model fitting uses all available cores and is
-faster, but the last decimal places of some results may differ.
-
-The published results were produced on Linux x86-64 (CPU only, 16 GB RAM) with the
-package versions in `requirements.txt`, and a `--test-run` on that platform reproduces
-them exactly. On other platforms, for example macOS on Apple silicon, floating-point
-differences can change some values in the third or fourth decimal place (cross-farm
-PR-AUC by up to 0.004 in our tests).
+CPU. Despite the name, `--test-run` runs the full experiments; it is not a shortened
+check. Without this option, model fitting uses the available cores and the neural
+baselines can use CUDA when available. This can speed up a run, but may change the results.
 
 Phase 2 regenerates `data/splits_folds.csv` and `data/split_statistics.csv`; the regenerated
 fold assignment is identical to the one in the dataset download.
@@ -179,7 +200,7 @@ fold assignment is identical to the one in the dataset download.
 | `--fps 30` | Frame rate used for feature extraction. Required on the first run of each run folder, then cached in its `pipeline.cfg`. |
 | `--run-name NAME` | Write results to `data/results/NAME/`. |
 | `--test-run` | Deterministic, single-threaded, CPU-only mode used for the paper. |
-| `--from-phase N` | Re-run from phase N (1–5) onwards. |
+| `--from-phase N` | Start at phase N (1–5), skipping earlier phases and honouring existing checkpoints. It does not force completed steps to run again. |
 | `--overwrite-results` | Delete the run folder and start again. |
 | `--dry-run` | Print the commands without running them. |
 | `-h`, `--help` | List all options. |
@@ -194,10 +215,38 @@ The pipeline has five phases:
 | 4 | Within-farm and cross-farm generalisation (XGBoost) | `src/cross_farm.py` |
 | 5 | Domain, subgroup and feature-level ablations; trajectory figures | `src/ablation.py`, `src/figures/` |
 
-### Reported results
+Use a new `--run-name` when you want a fresh run while keeping an earlier one for
+comparison. `--overwrite-results` replaces the selected run folder. Split files are
+shared by default, so use a separate `--splits-csv` path when working with another dataset.
+
+## Computing requirements and reproducibility
+
+The reference experiments ran on Linux x86-64 with a CPU, 16 GB RAM, Python 3.10 and
+the versions in `requirements.txt`. A similar environment is the best starting point
+for a close match. Deterministic settings reduce variation, but do not guarantee identical
+floating-point results across different processors, operating systems or library builds.
+Differences of up to 0.004 in cross-farm PR-AUC have been observed on macOS with Apple
+silicon; those differences exceed the comparison tool's default tolerance of 0.0005.
+
+The downloaded tracks and one saved run together occupy roughly 300 MB in a local
+checkout. Allow additional disk space for the Python environment, package downloads,
+reference archive and any extra runs. The environment size depends on the platform
+and whether GPU libraries are installed.
+
+The reference CPU model and timings for each phase are not documented here,
+so there is no reliable wall-clock estimate to quote. The full pipeline trains several
+models and repeats XGBoost fits for the ablations; the optional batch-size study adds
+five full ConvTran training runs. Start with the example in the README to check your
+installation, then allow time for a full run. Pipeline logs in `logs/` record progress
+with timestamps, and checkpoints let you resume completed work.
+
+## Reported results
 
 Model comparison on the held-out test set of the paper (fold 4, 5,456 tracks, 14.6% insect), for
-checking a reproduction. Latencies depend on the hardware.
+checking a reproduction. PR-AUC confidence intervals use 1,000 bootstrap resamples of
+the test set. Latency is the mean time for the classifier call on a precomputed feature
+vector or preprocessed sequence. It excludes video processing, tracking, gap filling,
+smoothing and feature extraction, and depends on the hardware.
 
 | Model | PR-AUC (95% CI) | τ | F1 | Recall | Precision | Latency (ms) |
 |---|---|---:|---:|---:|---:|---:|
@@ -219,7 +268,7 @@ The outputs of the run reported in the paper are attached to the
 each model, the feature table, the fitted LR, Random Forest and XGBoost models, and the
 outputs of the two supplementary studies, in the same layout as a run folder.
 
-To check your own run against them, unzip the archive and run:
+Unzip the archive into `WACV2027_paper_results/`, then compare the main results:
 
 ```bash
 python src/compare_results.py \
@@ -229,11 +278,26 @@ python src/compare_results.py \
     --splits-run data/splits_folds.csv --splits-reference WACV2027_paper_results/splits_folds.csv
 ```
 
-It compares every value behind the paper's tables, each model's per-track test scores, the
-feature table and the fold assignment. Each value is reported as identical, within the
-tolerance (`--tol`, default 0.0005) or different; latency is listed but not compared,
-because it depends on the hardware. The exit status is 0 when everything is within the
-tolerance. Use `--details-csv FILE` to save every comparison.
+The comparison checks the listed metrics and selected model settings behind the tables,
+along with test scores, labels and track identities for all seven classifiers. The two
+flags in the example also check the feature table and fold assignments. It checks saved
+values rather than comparing figures or fitted model files.
+
+Missing files, columns or rows in a requested comparison cause a failure, including
+when the reference archive is incomplete. A `MATCH` means all requested checks passed;
+the exit status is 0 for a match and 1 for missing or different results. Latencies are
+shown for context and do not affect the outcome.
+
+By default, the two separately run supplementary studies are left out. After running
+[both studies](#supplementary-studies), add `--include-supplementary` to the comparison
+command to include Tables 9 and 11. Their outputs must then be present in both folders.
+
+`--tol` sets the absolute tolerance for numeric metrics and prediction scores
+(default 0.0005). Predicted labels, true labels and fold assignments must agree exactly.
+Feature values use a separate relative tolerance of `1e-9`, with matching missing values
+allowed. Use `--details-csv comparison.csv` to save the comparisons. If your environment
+produces a difference, inspect it before changing the tolerance; accepting a larger
+difference does not establish that the runs are equivalent.
 
 ---
 
@@ -270,13 +334,16 @@ These two studies are not part of a default run.
 
 **Threshold robustness across farms (Supp. Table 9).** Retrains the Phase 4 XGBoost
 models and compares F1 at the fixed threshold (τ = 0.53) with F1 at each evaluation's own
-best threshold. Run it after the pipeline has finished:
+best threshold. The latter is a diagnostic calculated from test labels, rather than a
+threshold to select for deployment. Run it after the pipeline has finished, with one
+thread to match the reference configuration:
 
 ```bash
 python src/cross_farm_threshold_study.py \
     --features-csv data/results/paper/track_features.csv \
     --splits-csv   data/splits_folds.csv \
-    --output-dir   data/results/paper
+    --output-dir   data/results/paper \
+    --n-jobs 1
 ```
 
 **ConvTran batch-size sensitivity (Supp. Table 11).** The reported ConvTran is trained

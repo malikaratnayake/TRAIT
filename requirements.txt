@@ -1,6 +1,5 @@
 # TRAIT — dependencies (single environment)
-# Requires Python 3.10 or newer. If SciPy candidates stop at 1.13.1,
-# the active interpreter is older than this environment expects.
+# Requires Python 3.10 or newer; use Python 3.10 for paper reproduction.
 # Install into the trait-env virtual environment:
 #   python3.10 -m venv trait-env
 #   source trait-env/bin/activate        # macOS / Linux

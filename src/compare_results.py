@@ -5,30 +5,31 @@ Compare a pipeline run with the published results of the paper.
 
 Reads the result files of two run folders with the same layout — usually a
 fresh run (--run) and the published results from the GitHub release
-(--reference) — and compares every value behind the paper's tables, the
-per-track test predictions of every model, and optionally the feature table
-and the fold assignment. Nothing is written unless --details-csv is given.
+(--reference) — and compares selected table metrics and model settings,
+per-track test predictions, and optionally the feature table and folds.
+Nothing is written unless --details-csv is given.
 
 Each value is reported as identical, within --tol, or different. Latency is
 listed for information only, because it depends on the hardware. The exit
-status is 0 when every compared value is within the tolerance and 1
-otherwise.
+status is 0 only when all requested inputs are present and match. Missing
+files, columns, or rows fail the comparison, including in the reference.
+Feature values use a separate relative tolerance of 1e-9; labels and folds
+must agree exactly. The two separately run supplementary studies are opt-in.
 
 The published results were produced on Linux x86-64 (CPU only) in --test-run
-mode. A --test-run on the same platform and package versions is expected to
-match exactly; on other platforms some values can differ in the third or
-fourth decimal.
+mode. A similar environment is recommended for a close match, but processor
+and library differences can affect floating-point results.
 
-Compared (when present in both folders)
+Compared (required in both folders when requested)
 ---------------------------------------
   Table 3          phase3_model_comparison.csv, per-model results files
   Table 4          cross_farm/cross_farm_results.csv
   Table 5          ablation/domain_ablation_results.csv
   Table 6          ablation/domain_only_results.csv
   Supp. Table 8    selected hyperparameters in the per-model results files
-  Supp. Table 9    cross_farm_threshold_study/cross_farm_threshold_summary.csv
+  Supp. Table 9    cross_farm_threshold_study/ (with --include-supplementary)
   Supp. Table 10   operating points (from the XGBoost test predictions)
-  Supp. Table 11   convtran_batch_size_study/ (summary or bs_<N>/ folders)
+  Supp. Table 11   convtran_batch_size_study/ (with --include-supplementary)
   Supp. Table 12   ablation/group_loo_ablation.csv
   Supp. Table 13   ablation/feature_importance.csv
 
@@ -39,7 +40,7 @@ Usage
       --reference WACV2027_paper_results \\
       [--features] [--splits-run data/splits_folds.csv \\
                     --splits-reference WACV2027_paper_results/splits_folds.csv] \\
-      [--tol 0.0005] [--details-csv comparison.csv]
+      [--include-supplementary] [--tol 0.0005] [--details-csv comparison.csv]
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ def _batch_size_table(folder: Path) -> pd.DataFrame | None:
 def _operating_point_table(folder: Path) -> pd.DataFrame | None:
     """Supp. Table 10 rows, recomputed from the saved XGBoost test predictions."""
     model_dir = folder / "prauc_protocol" / "xgboost_prauc"
-    if not (model_dir / "predictions.csv").exists():
+    if not all((model_dir / name).exists() for name in ("predictions.csv", "results.json")):
         return None
     preds = pd.read_csv(model_dir / "predictions.csv")
     deployed = float(json.loads((model_dir / "results.json").read_text())["threshold"])
@@ -122,21 +123,48 @@ def _operating_point_table(folder: Path) -> pd.DataFrame | None:
                             DEFAULT_THRESHOLDS, deployed)
 
 
-def compare_frames(item: str, name: str, ref: pd.DataFrame, run: pd.DataFrame,
+def _problem(item: str, name: str, status: str, row: str = "", column: str = "") -> dict:
+    """Use the same report format for missing or invalid inputs and value differences."""
+    return {"item": item, "file": name, "row": row, "column": column,
+            "reference": "", "run": "", "difference": float("nan"), "status": status}
+
+
+def _frame_issues(item: str, name: str, ref: pd.DataFrame | None,
+                  run: pd.DataFrame | None, key: str, columns: list[str]) -> list[dict]:
+    """Reject incomplete tables before joining rows or comparing values."""
+    issues = []
+    for side, frame in (("reference", ref), ("run", run)):
+        if frame is None:
+            issues.append(_problem(item, name, f"missing in {side}"))
+            continue
+        missing = sorted(set([key, *columns]) - set(frame.columns))
+        if missing:
+            issues.append(_problem(item, name, f"columns missing in {side}",
+                                   column=", ".join(missing)))
+        if frame.empty:
+            issues.append(_problem(item, name, f"empty in {side}"))
+        elif key in frame and (frame[key].isna().any() or frame[key].duplicated().any()):
+            issues.append(_problem(item, name, f"invalid keys in {side}", column=key))
+    return issues
+
+
+def compare_frames(item: str, name: str, ref: pd.DataFrame | None, run: pd.DataFrame | None,
                    key: str, columns: list[str], tol: float) -> list[dict]:
     """Compare the rows with the same key column by column."""
-    out = []
+    out = _frame_issues(item, name, ref, run, key, columns)
+    if out:
+        return out
     ref, run = ref.set_index(key), run.set_index(key)
+    for row in run.index.difference(ref.index):
+        out.append(_problem(item, name, "row only in run", row=row))
     for row in ref.index:
         if row not in run.index:
             out.append({"item": item, "file": name, "row": row, "column": "", "reference": "",
                         "run": "", "difference": "", "status": "row only in reference"})
             continue
         for col in columns:
-            if col not in ref.columns or col not in run.columns:
-                continue
             a, b = ref.at[row, col], run.at[row, col]
-            if pd.isna(a) and pd.isna(b):
+            if (pd.isna(a) and pd.isna(b)) or a == b:
                 status, diff = "identical", 0.0
             else:
                 try:
@@ -156,17 +184,28 @@ def compare_predictions(ref_dir: Path, run_dir: Path, tol: float) -> list[dict]:
     out = []
     for model, rel in PREDICTIONS:
         ref, run = _read(ref_dir, rel), _read(run_dir, rel)
-        if ref is None or run is None:
+        issues = _frame_issues("Test predictions", rel, ref, run, "filename",
+                               ["y_true", "y_pred", "score"])
+        if issues:
+            out.extend(issues)
             continue
-        m = ref.merge(run, on="filename", suffixes=("_ref", "_run"))
+        for side, frame in (("reference", ref), ("run", run)):
+            if (not np.isfinite(pd.to_numeric(frame["score"], errors="coerce")).all()
+                    or not frame[["y_true", "y_pred"]].isin([0, 1]).all().all()):
+                issues.append(_problem("Test predictions", rel, f"invalid values in {side}", row=model))
+        if issues:
+            out.extend(issues)
+            continue
+        m = ref.merge(run, on="filename", suffixes=("_ref", "_run"), validate="one_to_one")
         dscore = (m["score_run"] - m["score_ref"]).abs()
         n_label = int((m["y_pred_ref"] != m["y_pred_run"]).sum())
+        n_true = int((m["y_true_ref"] != m["y_true_run"]).sum())
         same_tracks = len(m) == len(ref) == len(run)
-        status = ("different" if not same_tracks or n_label else
+        status = ("different" if not same_tracks or n_label or n_true else
                   "identical" if dscore.max() == 0 else
                   "within tolerance" if dscore.max() <= tol else "different")
         out.append({"item": "Test predictions", "file": rel, "row": model,
-                    "column": f"{len(m)} of {len(ref)} tracks; labels differing: {n_label}",
+                    "column": f"{len(m)} of {len(ref)} tracks; predicted labels differing: {n_label}; true labels differing: {n_true}",
                     "reference": "", "run": "", "difference": float(dscore.max()), "status": status})
     return out
 
@@ -174,23 +213,33 @@ def compare_predictions(ref_dir: Path, run_dir: Path, tol: float) -> list[dict]:
 def compare_features(ref_dir: Path, run_dir: Path) -> list[dict]:
     """Feature table: number of values that are not equal (to 1e-9 relative)."""
     ref, run = _read(ref_dir, "track_features.csv"), _read(run_dir, "track_features.csv")
-    if ref is None or run is None:
-        return []
-    m = ref.merge(run, on="filename", suffixes=("_ref", "_run"))
-    cols = [c for c in ref.columns if c not in ("filename", "label") and f"{c}_run" in m.columns]
+    cols = sorted(set().union(*(set(d.columns) for d in (ref, run) if d is not None))
+                  - {"filename", "label"})
+    issues = _frame_issues("Feature table", "track_features.csv", ref, run,
+                           "filename", ["label", *cols])
+    if issues:
+        return issues
+    if not cols:
+        return [_problem("Feature table", "track_features.csv", "no feature columns")]
+    m = ref.merge(run, on="filename", suffixes=("_ref", "_run"), validate="one_to_one")
     a = m[[f"{c}_ref" for c in cols]].to_numpy(dtype=float)
     b = m[[f"{c}_run" for c in cols]].to_numpy(dtype=float)
     differ = ~np.isclose(a, b, rtol=1e-9, atol=0, equal_nan=True)
-    status = "identical" if not differ.any() and len(m) == len(ref) == len(run) else "different"
+    n_label = int((m["label_ref"] != m["label_run"]).sum())
+    status = ("identical" if not differ.any() and not n_label
+              and len(m) == len(ref) == len(run) else "different")
     return [{"item": "Feature table", "file": "track_features.csv", "row": f"{len(m)} tracks × {len(cols)} features",
-             "column": f"values differing: {int(differ.sum())}", "reference": "", "run": "",
+             "column": f"values differing: {int(differ.sum())}; labels differing: {n_label}", "reference": "", "run": "",
              "difference": "", "status": status}]
 
 
 def compare_splits(ref_csv: Path, run_csv: Path) -> list[dict]:
     """Fold assignment of every track (Table 1 and every result depend on it)."""
-    ref, run = pd.read_csv(ref_csv), pd.read_csv(run_csv)
-    m = ref.merge(run, on="filename", suffixes=("_ref", "_run"))
+    ref, run = _read(ref_csv.parent, ref_csv.name), _read(run_csv.parent, run_csv.name)
+    issues = _frame_issues("Table 1 / folds", run_csv.name, ref, run, "filename", ["fold"])
+    if issues:
+        return issues
+    m = ref.merge(run, on="filename", suffixes=("_ref", "_run"), validate="one_to_one")
     n_diff = int((m["fold_ref"] != m["fold_run"]).sum())
     status = "identical" if n_diff == 0 and len(m) == len(ref) == len(run) else "different"
     return [{"item": "Table 1 / folds", "file": run_csv.name, "row": f"{len(m)} tracks",
@@ -205,11 +254,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reference", required=True, help="Published results folder (unzipped release asset)")
     p.add_argument("--tol", type=float, default=0.0005,
                    help="Largest absolute difference counted as a match (default: 0.0005)")
-    p.add_argument("--features", action="store_true", help="Also compare the 55 MB feature table")
+    p.add_argument("--features", action="store_true", help="Require and compare the feature table")
+    p.add_argument("--include-supplementary", action="store_true",
+                   help="Require and compare the separate studies for Supp. Tables 9 and 11")
     p.add_argument("--splits-run", default=None, help="Fold file of the run, e.g. data/splits_folds.csv")
     p.add_argument("--splits-reference", default=None, help="Published fold file")
     p.add_argument("--details-csv", default=None, help="Write every comparison to this CSV")
-    return p.parse_args()
+    args = p.parse_args()
+    if bool(args.splits_run) != bool(args.splits_reference):
+        p.error("--splits-run and --splits-reference must be supplied together")
+    if not np.isfinite(args.tol) or args.tol < 0:
+        p.error("--tol must be a finite, non-negative number")
+    return args
 
 
 def main() -> int:
@@ -220,16 +276,11 @@ def main() -> int:
         if not d.is_dir():
             raise SystemExit(f"Folder not found: {d}")
 
-    rows, skipped = [], []
+    rows = []
     for item, rel, key, cols, required in TABLES:
-        ref, run = _read(ref_dir, rel), _read(run_dir, rel)
-        if ref is None or run is None:
-            if ref is not None and required:
-                rows.append({"item": item, "file": rel, "row": "", "column": "", "reference": "",
-                             "run": "", "difference": "", "status": "missing in run"})
-            else:
-                skipped.append(f"{item} ({rel})")
+        if not required and not args.include_supplementary:
             continue
+        ref, run = _read(ref_dir, rel), _read(run_dir, rel)
         rows += compare_frames(item, rel, ref, run, key, cols, args.tol)
 
     for item, loader, key, cols in [
@@ -237,26 +288,37 @@ def main() -> int:
          ["precision", "recall", "f1", "missed_insect_pct", "false_positives"]),
         ("Supp. Table 11", _batch_size_table, "batch_size", ["pr_auc", "pr_auc_lo", "pr_auc_hi", "f1", "selected_epochs"]),
     ]:
-        ref, run = loader(ref_dir), loader(run_dir)
-        if ref is None or run is None:
-            skipped.append(item)
+        if item == "Supp. Table 11" and not args.include_supplementary:
             continue
+        frames, issues = [], []
+        for side, folder in (("reference", ref_dir), ("run", run_dir)):
+            try:
+                frames.append(loader(folder))
+            except (KeyError, ValueError, IndexError) as exc:
+                issues.append(_problem(item, item, f"invalid input in {side}", column=str(exc)))
+        if issues:
+            rows.extend(issues)
+            continue
+        ref, run = frames
         rows += compare_frames(item, item, ref, run, key, cols, args.tol)
 
     rows += compare_predictions(ref_dir, run_dir, args.tol)
     if args.features:
         rows += compare_features(ref_dir, run_dir)
     if args.splits_run and args.splits_reference:
-        rows += compare_splits(Path(args.splits_reference), Path(args.splits_run))
+        rows += compare_splits(Path(args.splits_reference).expanduser(), Path(args.splits_run).expanduser())
 
     df = pd.DataFrame(rows)
     print(f"\nRun       : {run_dir}\nReference : {ref_dir}\nTolerance : {args.tol}\n")
+    print("Scope: main pipeline results" + (" and separate supplementary studies"
+                                              if args.include_supplementary else ""))
+    if not args.include_supplementary:
+        print("Supp. Tables 9 and 11 are not requested (use --include-supplementary to include them).")
     summary = (df.groupby(["item", "status"], sort=False).size().unstack(fill_value=0)
-               .reindex(columns=["identical", "within tolerance", "different",
-                                 "row only in reference", "missing in run"], fill_value=0))
-    extra = [c for c in ("row only in reference", "missing in run") if not summary[c].any()]
-    print(summary.drop(columns=extra).to_string())
-    preds = df[df["item"] == "Test predictions"]
+               .fillna(0).astype(int))
+    print(summary.to_string())
+    preds = df[(df["item"] == "Test predictions") & df["status"].isin(
+        ["identical", "within tolerance", "different"])]
     if not preds.empty:
         print("\nPer-track test predictions (largest score difference):")
         for r in preds.itertuples():
@@ -266,19 +328,19 @@ def main() -> int:
         print(f"\n{r.item}: {r.row}, {r.column} — {r.status}")
 
     ref_lat, run_lat = _read(ref_dir, "phase3_model_comparison.csv"), _read(run_dir, "phase3_model_comparison.csv")
-    if ref_lat is not None and run_lat is not None:
+    if all(d is not None and {"Model", "latency_mean_ms"}.issubset(d.columns)
+           for d in (ref_lat, run_lat)):
         lat = ref_lat[["Model", "latency_mean_ms"]].merge(run_lat[["Model", "latency_mean_ms"]],
                                                           on="Model", suffixes=(" reference", " run"))
         print("\nLatency in ms (depends on hardware, not compared):")
         print(lat.to_string(index=False))
-    if skipped:
-        print("\nNot compared (missing in one or both folders): " + "; ".join(skipped))
-
     bad = df[~df["status"].isin(["identical", "within tolerance"])]
     if not bad.empty:
-        print(f"\nValues outside the tolerance ({len(bad)}):")
+        print(f"\nMissing, invalid or different results ({len(bad)}):")
         for r in bad.head(40).itertuples():
-            print(f"  {r.item:<24} {str(r.row):<34} {r.column:<26} reference={r.reference}  run={r.run}  ({r.status})")
+            print(f"  {r.item} — {r.file}: {r.status}")
+            if r.row != "" or r.column != "":
+                print(f"    {r.row} {r.column}  reference={r.reference}  run={r.run}")
         if len(bad) > 40:
             print(f"  … {len(bad) - 40} more (use --details-csv)")
     if args.details_csv:
@@ -286,7 +348,9 @@ def main() -> int:
         print(f"\nAll comparisons → {args.details_csv}")
 
     n_ok = int(df["status"].isin(["identical", "within tolerance"]).sum())
-    print(f"\nResult: {'MATCH' if bad.empty else 'DIFFERENT'} — {n_ok} of {len(df)} comparisons within tolerance")
+    result = ("MATCH" if bad.empty else "INCOMPLETE" if (bad["status"] != "different").any()
+              else "DIFFERENT")
+    print(f"\nResult: {result} — {n_ok} of {len(df)} checks passed")
     return 0 if bad.empty else 1
 
 
